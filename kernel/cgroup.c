@@ -1883,6 +1883,76 @@ static void init_cgroup_root(struct cgroup_root *root,
 	init_cgroup_housekeeping(cgrp);
 	idr_init(&root->cgroup_idr);
 
+static int cgroup_init_root_id(struct cgroupfs_root *root)
+{
+	int ret;
+
+	do {
+		if (!ida_pre_get(&hierarchy_ida, GFP_KERNEL))
+			return -ENOMEM;
+		spin_lock(&hierarchy_id_lock);
+		/* Try to allocate the next unused ID */
+		ret = ida_get_new_above(&hierarchy_ida, next_hierarchy_id,
+					&root->hierarchy_id);
+		if (ret == -ENOSPC)
+			/* Try again starting from 0 */
+			ret = ida_get_new(&hierarchy_ida, &root->hierarchy_id);
+		if (!ret) {
+			next_hierarchy_id = root->hierarchy_id + 1;
+		} else if (ret != -EAGAIN) {
+			/* Can only get here if the 31-bit IDR is full ... */
+			BUG_ON(ret);
+		}
+		spin_unlock(&hierarchy_id_lock);
+	} while (ret);
+	return 0;
+}
+
+static void cgroup_exit_root_id(struct cgroupfs_root *root)
+{
+	if (root->hierarchy_id) {
+		spin_lock(&hierarchy_id_lock);
+		ida_remove(&hierarchy_ida, root->hierarchy_id);
+		spin_unlock(&hierarchy_id_lock);
+
+		root->hierarchy_id = 0;
+	}
+}
+
+static int cgroup_test_super(struct super_block *sb, void *data)
+{
+	struct cgroup_sb_opts *opts = data;
+	struct cgroupfs_root *root = sb->s_fs_info;
+
+	/* If we asked for a name then it must match */
+	if (opts->name && strcmp(opts->name, root->name))
+		return 0;
+
+	/*
+	 * If we asked for subsystems (or explicitly for no
+	 * subsystems) then they must match
+	 */
+	if ((opts->subsys_mask || opts->none)
+	    && (opts->subsys_mask != root->subsys_mask))
+		return 0;
+
+	return 1;
+}
+
+static struct cgroupfs_root *cgroup_root_from_opts(struct cgroup_sb_opts *opts)
+{
+	struct cgroupfs_root *root;
+
+	if (!opts->subsys_mask && !opts->none)
+		return NULL;
+
+	root = kzalloc(sizeof(*root), GFP_KERNEL);
+	if (!root)
+		return ERR_PTR(-ENOMEM);
+
+	init_cgroup_root(root);
+
+	root->subsys_mask = opts->subsys_mask;
 	root->flags = opts->flags;
 	if (opts->release_agent)
 		strcpy(root->release_agent_path, opts->release_agent);
@@ -1900,6 +1970,17 @@ static int cgroup_setup_root(struct cgroup_root *root, u16 ss_mask)
 	int i, ret;
 
 	lockdep_assert_held(&cgroup_mutex);
+}
+static void cgroup_free_root(struct cgroupfs_root *root)
+{
+	if (root) {
+		/* hierarhcy ID shoulid already have been released */
+		WARN_ON_ONCE(root->hierarchy_id);
+
+		ida_destroy(&root->cgroup_ida);
+		kfree(root);
+	}
+}
 
 	ret = cgroup_idr_alloc(&root->cgroup_idr, root_cgrp, 1, 2, GFP_KERNEL);
 	if (ret < 0)
@@ -2049,11 +2130,62 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		    ss->root == &cgrp_dfl_root)
 			continue;
 
-		if (!percpu_ref_tryget_live(&ss->root->cgrp.self.refcnt)) {
-			mutex_unlock(&cgroup_mutex);
-			msleep(10);
-			ret = restart_syscall();
-			goto out_free;
+	/* Locate an existing or new sb for this hierarchy */
+	sb = sget(fs_type, cgroup_test_super, cgroup_set_super, 0, &opts);
+	if (IS_ERR(sb)) {
+		ret = PTR_ERR(sb);
+		cgroup_free_root(opts.new_root);
+		goto drop_modules;
+	}
+
+	root = sb->s_fs_info;
+	BUG_ON(!root);
+	if (root == opts.new_root) {
+		/* We used the new root structure, so this is a new hierarchy */
+		struct list_head tmp_cg_links;
+		struct cgroup *root_cgrp = &root->top_cgroup;
+		struct cgroupfs_root *existing_root;
+		const struct cred *cred;
+		int i;
+		struct css_set *cg;
+
+		BUG_ON(sb->s_root != NULL);
+
+		ret = cgroup_get_rootdir(sb);
+		if (ret)
+			goto drop_new_super;
+		inode = sb->s_root->d_inode;
+
+		mutex_lock(&inode->i_mutex);
+		mutex_lock(&cgroup_mutex);
+		mutex_lock(&cgroup_root_mutex);
+
+		/* Check for name clashes with existing mounts */
+		ret = -EBUSY;
+		if (strlen(root->name))
+			for_each_active_root(existing_root)
+				if (!strcmp(existing_root->name, root->name))
+					goto unlock_drop;
+
+		/*
+		 * We're accessing css_set_count without locking
+		 * css_set_lock here, but that's OK - it can only be
+		 * increased by someone holding cgroup_lock, and
+		 * that's us. The worst that can happen is that we
+		 * have some link structures left over
+		 */
+		ret = allocate_cg_links(css_set_count, &tmp_cg_links);
+		if (ret)
+			goto unlock_drop;
+
+		ret = cgroup_init_root_id(root);
+		if (ret)
+			goto unlock_drop;
+
+		ret = rebind_subsystems(root, root->subsys_mask);
+		if (ret == -EBUSY) {
+			free_cg_links(&tmp_cg_links);
+			goto unlock_drop;
 		}
 		cgroup_put(&ss->root->cgrp);
 	}
@@ -2069,10 +2201,49 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		 * name matches but sybsys_mask doesn't, we should fail.
 		 * Remember whether name matched.
 		 */
-		if (opts.name) {
-			if (strcmp(opts.name, root->name))
-				continue;
-			name_match = true;
+
+		/* EBUSY should be the only error here */
+		BUG_ON(ret);
+
+		list_add(&root->root_list, &roots);
+		root_count++;
+
+		sb->s_root->d_fsdata = root_cgrp;
+		root->top_cgroup.dentry = sb->s_root;
+
+		/* Link the top cgroup in this hierarchy into all
+		 * the css_set objects */
+		write_lock(&css_set_lock);
+		hash_for_each(css_set_table, i, cg, hlist)
+			link_css_set(&tmp_cg_links, cg, root_cgrp);
+		write_unlock(&css_set_lock);
+
+		free_cg_links(&tmp_cg_links);
+
+		BUG_ON(!list_empty(&root_cgrp->children));
+		BUG_ON(root->number_of_cgroups != 1);
+
+		cred = override_creds(&init_cred);
+		cgroup_populate_dir(root_cgrp, true, root->subsys_mask);
+		revert_creds(cred);
+		mutex_unlock(&cgroup_root_mutex);
+		mutex_unlock(&cgroup_mutex);
+		mutex_unlock(&inode->i_mutex);
+	} else {
+		/*
+		 * We re-used an existing hierarchy - the new root (if
+		 * any) is not needed
+		 */
+		cgroup_free_root(opts.new_root);
+
+		if (root->flags != opts.flags) {
+			if ((root->flags | opts.flags) & CGRP_ROOT_SANE_BEHAVIOR) {
+				pr_err("cgroup: sane_behavior: new mount options should match the existing superblock\n");
+				ret = -EINVAL;
+				goto drop_new_super;
+			} else {
+				pr_warning("cgroup: new mount options do not match the existing superblock, will be ignored\n");
+			}
 		}
 
 		/*
@@ -2127,25 +2298,9 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		goto out_unlock;
 	}
 
-	/* Hierarchies may only be created in the initial cgroup namespace. */
-	if (ns != &init_cgroup_ns) {
-		ret = -EPERM;
-		goto out_unlock;
-	}
-
-	root = kzalloc(sizeof(*root), GFP_KERNEL);
-	if (!root) {
-		ret = -ENOMEM;
-		goto out_unlock;
-	}
-
-	init_cgroup_root(root, &opts);
-
-	ret = cgroup_setup_root(root, opts.subsys_mask);
-	if (ret)
-		cgroup_free_root(root);
-
-out_unlock:
+ unlock_drop:
+	cgroup_exit_root_id(root);
+	mutex_unlock(&cgroup_root_mutex);
 	mutex_unlock(&cgroup_mutex);
 out_free:
 	kfree(opts.release_agent);
@@ -2216,7 +2371,28 @@ static void cgroup_kill_sb(struct super_block *sb)
 	else
 		percpu_ref_kill(&root->cgrp.self.refcnt);
 
-	kernfs_kill_sb(sb);
+	list_for_each_entry_safe(link, saved_link, &cgrp->css_sets,
+				 cgrp_link_list) {
+		list_del(&link->cg_link_list);
+		list_del(&link->cgrp_link_list);
+		kfree(link);
+	}
+	write_unlock(&css_set_lock);
+
+	if (!list_empty(&root->root_list)) {
+		list_del(&root->root_list);
+		root_count--;
+	}
+
+	cgroup_exit_root_id(root);
+
+	mutex_unlock(&cgroup_root_mutex);
+	mutex_unlock(&cgroup_mutex);
+
+	simple_xattrs_free(&cgrp->xattrs);
+
+	kill_litter_super(sb);
+	cgroup_free_root(root);
 }
 
 static struct file_system_type cgroup_fs_type = {
@@ -5708,10 +5884,12 @@ int __init cgroup_init(void)
 			ss->bind(init_css_set.subsys[ssid]);
 	}
 
-	/* init_css_set.subsys[] has been updated, re-hash */
-	hash_del(&init_css_set.hlist);
-	hash_add(css_set_table, &init_css_set.hlist,
-		 css_set_hash(init_css_set.subsys));
+	/* Add init_css_set to the hash table */
+	key = css_set_hash(init_css_set.subsys);
+	hash_add(css_set_table, &init_css_set.hlist, key);
+
+	/* allocate id for the dummy hierarchy */
+	BUG_ON(cgroup_init_root_id(&rootnode));
 
 	cgroup_kobj = kobject_create_and_add("cgroup", fs_kobj);
 	if (!cgroup_kobj)
