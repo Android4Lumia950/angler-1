@@ -235,9 +235,38 @@ void css_task_iter_end(struct css_task_iter *it);
  * Note that the walk visibility guarantee example described in pre-order
  * walk doesn't apply the same to post-order walks.
  */
-#define css_for_each_descendant_post(pos, css)				\
-	for ((pos) = css_next_descendant_post(NULL, (css)); (pos);	\
-	     (pos) = css_next_descendant_post((pos), (css)))
+static inline bool cgroup_sane_behavior(const struct cgroup *cgrp)
+{
+	return cgrp->root->flags & CGRP_ROOT_SANE_BEHAVIOR;
+}
+
+/* Caller should hold rcu_read_lock() */
+static inline const char *cgroup_name(const struct cgroup *cgrp)
+{
+	return rcu_dereference(cgrp->name)->name;
+}
+
+int cgroup_add_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
+int cgroup_rm_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
+
+int cgroup_is_removed(const struct cgroup *cgrp);
+bool cgroup_is_descendant(struct cgroup *cgrp, struct cgroup *ancestor);
+
+int cgroup_path(const struct cgroup *cgrp, char *buf, int buflen);
+int task_cgroup_path_from_hierarchy(struct task_struct *task, int hierarchy_id,
+				    char *buf, size_t buflen);
+
+int cgroup_task_count(const struct cgroup *cgrp);
+
+/*
+ * Control Group taskset, used to pass around set of tasks to cgroup_subsys
+ * methods.
+ */
+struct cgroup_taskset;
+struct task_struct *cgroup_taskset_first(struct cgroup_taskset *tset);
+struct task_struct *cgroup_taskset_next(struct cgroup_taskset *tset);
+struct cgroup *cgroup_taskset_cur_cgroup(struct cgroup_taskset *tset);
+int cgroup_taskset_size(struct cgroup_taskset *tset);
 
 /**
  * cgroup_taskset_for_each - iterate cgroup_taskset
