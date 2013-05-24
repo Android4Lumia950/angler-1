@@ -4271,21 +4271,13 @@ EXPORT_SYMBOL_GPL(cgroup_next_sibling);
  * @pos: the current position (%NULL to initiate traversal)
  * @root: css whose descendants to walk
  *
- * To be used by css_for_each_descendant_pre().  Find the next descendant
- * to visit for pre-order traversal of @root's descendants.  @root is
- * included in the iteration and the first node to be visited.
+ * To be used by cgroup_for_each_descendant_pre().  Find the next
+ * descendant to visit for pre-order traversal of @cgroup's descendants.
  *
- * While this function requires cgroup_mutex or RCU read locking, it
- * doesn't require the whole traversal to be contained in a single critical
- * section.  This function will return the correct next descendant as long
- * as both @pos and @root are accessible and @pos is a descendant of @root.
- *
- * If a subsystem synchronizes ->css_online() and the start of iteration, a
- * css which finished ->css_online() is guaranteed to be visible in the
- * future iterations and will stay visible until the last reference is put.
- * A css which hasn't finished ->css_online() or already finished
- * ->css_offline() may show up during traversal.  It's each subsystem's
- * responsibility to synchronize against on/offlining.
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct next descendant as long as both @pos
+ * and @cgroup are accessible and @pos is a descendant of @cgroup.
  */
 struct cgroup_subsys_state *
 css_next_descendant_pre(struct cgroup_subsys_state *pos,
@@ -4305,8 +4297,8 @@ css_next_descendant_pre(struct cgroup_subsys_state *pos,
 		return next;
 
 	/* no child, visit my or the closest ancestor's next sibling */
-	while (pos != root) {
-		next = css_next_child(pos, pos->parent);
+	while (pos != cgroup) {
+		next = cgroup_next_sibling(pos);
 		if (next)
 			return next;
 		pos = pos->parent;
@@ -4323,10 +4315,10 @@ css_next_descendant_pre(struct cgroup_subsys_state *pos,
  * is returned.  This can be used during pre-order traversal to skip
  * subtree of @pos.
  *
- * While this function requires cgroup_mutex or RCU read locking, it
- * doesn't require the whole traversal to be contained in a single critical
- * section.  This function will return the correct rightmost descendant as
- * long as @pos is accessible.
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct rightmost descendant as long as @pos is
+ * accessible.
  */
 struct cgroup_subsys_state *
 css_rightmost_descendant(struct cgroup_subsys_state *pos)
@@ -4364,22 +4356,13 @@ css_leftmost_descendant(struct cgroup_subsys_state *pos)
  * @pos: the current position (%NULL to initiate traversal)
  * @root: css whose descendants to walk
  *
- * To be used by css_for_each_descendant_post().  Find the next descendant
- * to visit for post-order traversal of @root's descendants.  @root is
- * included in the iteration and the last node to be visited.
+ * To be used by cgroup_for_each_descendant_post().  Find the next
+ * descendant to visit for post-order traversal of @cgroup's descendants.
  *
- * While this function requires cgroup_mutex or RCU read locking, it
- * doesn't require the whole traversal to be contained in a single critical
- * section.  This function will return the correct next descendant as long
- * as both @pos and @cgroup are accessible and @pos is a descendant of
- * @cgroup.
- *
- * If a subsystem synchronizes ->css_online() and the start of iteration, a
- * css which finished ->css_online() is guaranteed to be visible in the
- * future iterations and will stay visible until the last reference is put.
- * A css which hasn't finished ->css_online() or already finished
- * ->css_offline() may show up during traversal.  It's each subsystem's
- * responsibility to synchronize against on/offlining.
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct next descendant as long as both @pos
+ * and @cgroup are accessible and @pos is a descendant of @cgroup.
  */
 struct cgroup_subsys_state *
 css_next_descendant_post(struct cgroup_subsys_state *pos,
@@ -4398,9 +4381,9 @@ css_next_descendant_post(struct cgroup_subsys_state *pos,
 		return NULL;
 
 	/* if there's an unvisited sibling, visit its leftmost descendant */
-	next = css_next_child(pos, pos->parent);
+	next = cgroup_next_sibling(pos);
 	if (next)
-		return css_leftmost_descendant(next);
+		return cgroup_leftmost_descendant(next);
 
 	/* no sibling left, visit parent */
 	return pos->parent;

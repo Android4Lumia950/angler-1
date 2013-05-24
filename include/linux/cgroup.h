@@ -720,18 +720,27 @@ static inline struct cgroup_subsys_state *task_css(struct task_struct *task,
 struct cgroup *cgroup_next_sibling(struct cgroup *pos);
 
 /**
- * task_css_is_root - test whether a task belongs to the root css
- * @task: the target task
- * @subsys_id: the target subsystem ID
+ * cgroup_for_each_child - iterate through children of a cgroup
+ * @pos: the cgroup * to use as the loop cursor
+ * @cgrp: cgroup whose children to walk
  *
- * Test whether @task belongs to the root css on the specified subsystem.
- * May be invoked in any context.
+ * Walk @cgrp's children.  Must be called under rcu_read_lock().  A child
+ * cgroup which hasn't finished ->css_online() or already has finished
+ * ->css_offline() may show up during traversal and it's each subsystem's
+ * responsibility to verify that each @pos is alive.
+ *
+ * If a subsystem synchronizes against the parent in its ->css_online() and
+ * before starting iterating, a cgroup which finished ->css_online() is
+ * guaranteed to be visible in the future iterations.
+ *
+ * It is allowed to temporarily drop RCU read lock during iteration.  The
+ * caller is responsible for ensuring that @pos remains accessible until
+ * the start of the next iteration by, for example, bumping the css refcnt.
  */
-static inline bool task_css_is_root(struct task_struct *task, int subsys_id)
-{
-	return task_css_check(task, subsys_id, true) ==
-		init_css_set.subsys[subsys_id];
-}
+#define cgroup_for_each_child(pos, cgrp)				\
+	for ((pos) = list_first_or_null_rcu(&(cgrp)->children,		\
+					    struct cgroup, sibling);	\
+	     (pos); (pos) = cgroup_next_sibling((pos)))
 
 static inline struct cgroup *task_cgroup(struct task_struct *task,
 					 int subsys_id)
@@ -779,32 +788,13 @@ static inline struct cgroup *cgroup_parent(struct cgroup *cgrp)
  * - "tasks" is removed.  Everything should be at process granularity.  Use
  *   "cgroup.procs" instead.
  *
- * - "cgroup.procs" is not sorted.  pids will be unique unless they got
- *   recycled inbetween reads.
+ * Alternatively, a subsystem may choose to use a single global lock to
+ * synchronize ->css_online() and ->css_offline() against tree-walking
+ * operations.
  *
- * - "release_agent" and "notify_on_release" are removed.  Replacement
- *   notification mechanism will be implemented.
- *
- * - "cgroup.clone_children" is removed.
- *
- * - "cgroup.subtree_populated" is available.  Its value is 0 if the cgroup
- *   and its descendants contain no task; otherwise, 1.  The file also
- *   generates kernfs notification which can be monitored through poll and
- *   [di]notify when the value of the file changes.
- *
- * - cpuset: tasks will be kept in empty cpusets when hotplug happens and
- *   take masks of ancestors with non-empty cpus/mems, instead of being
- *   moved to an ancestor.
- *
- * - cpuset: a task can be moved into an empty cpuset, and again it takes
- *   masks of ancestors.
- *
- * - memcg: use_hierarchy is on by default and the cgroup file for the flag
- *   is not created.
- *
- * - blkcg: blk-throttle becomes properly hierarchical.
- *
- * - debug: disallowed on the default hierarchy.
+ * It is allowed to temporarily drop RCU read lock during iteration.  The
+ * caller is responsible for ensuring that @pos remains accessible until
+ * the start of the next iteration by, for example, bumping the css refcnt.
  */
 static inline bool cgroup_on_dfl(const struct cgroup *cgrp)
 {
