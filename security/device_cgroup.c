@@ -541,13 +541,13 @@ static void revalidate_active_exceptions(struct dev_cgroup *devcg)
 static int propagate_exception(struct dev_cgroup *devcg_root,
 			       struct dev_exception_item *ex)
 {
-	struct cgroup_subsys_state *pos;
+	struct cgroup *root = devcg_root->css.cgroup, *pos;
 	int rc = 0;
 
 	rcu_read_lock();
 
-	css_for_each_descendant_pre(pos, &devcg_root->css) {
-		struct dev_cgroup *devcg = css_to_devcgroup(pos);
+	cgroup_for_each_descendant_pre(pos, root) {
+		struct dev_cgroup *devcg = cgroup_to_devcgroup(pos);
 
 		/*
 		 * Because devcgroup_mutex is held, no devcg will become
@@ -555,7 +555,7 @@ static int propagate_exception(struct dev_cgroup *devcg_root,
 		 * methods), and online ones are safe to access outside RCU
 		 * read lock without bumping refcnt.
 		 */
-		if (pos == &devcg_root->css || !is_devcg_online(devcg))
+		if (!is_devcg_online(devcg))
 			continue;
 
 		rcu_read_unlock();
