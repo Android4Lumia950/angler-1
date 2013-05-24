@@ -274,7 +274,8 @@ static int cgroup_idr_alloc(struct idr *idr, void *ptr, int start, int end,
 	return ret;
 }
 
-static void *cgroup_idr_replace(struct idr *idr, void *ptr, int id)
+/* convenient tests for these bits */
+static inline bool cgroup_is_removed(const struct cgroup *cgrp)
 {
 	void *ret;
 
