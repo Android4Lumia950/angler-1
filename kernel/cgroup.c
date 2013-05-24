@@ -3095,6 +3095,11 @@ EXPORT_SYMBOL_GPL(cgroup_next_sibling);
  *
  * To be used by cgroup_for_each_descendant_pre().  Find the next
  * descendant to visit for pre-order traversal of @cgroup's descendants.
+ *
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct next descendant as long as both @pos
+ * and @cgroup are accessible and @pos is a descendant of @cgroup.
  */
 struct cgroup *cgroup_next_descendant_pre(struct cgroup *pos,
 					  struct cgroup *cgroup)
@@ -3114,11 +3119,9 @@ struct cgroup *cgroup_next_descendant_pre(struct cgroup *pos,
 
 	/* no child, visit my or the closest ancestor's next sibling */
 	while (pos != cgroup) {
-		next = list_entry_rcu(pos->sibling.next, struct cgroup,
-				      sibling);
-		if (&next->sibling != &pos->parent->children)
+		next = cgroup_next_sibling(pos);
+		if (next)
 			return next;
-
 		pos = pos->parent;
 	}
 
@@ -3133,6 +3136,11 @@ EXPORT_SYMBOL_GPL(cgroup_next_descendant_pre);
  * Return the rightmost descendant of @pos.  If there's no descendant,
  * @pos is returned.  This can be used during pre-order traversal to skip
  * subtree of @pos.
+ *
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct rightmost descendant as long as @pos is
+ * accessible.
  */
 struct cgroup *cgroup_rightmost_descendant(struct cgroup *pos)
 {
@@ -3172,368 +3180,43 @@ static struct cgroup *cgroup_leftmost_descendant(struct cgroup *pos)
  *
  * To be used by cgroup_for_each_descendant_post().  Find the next
  * descendant to visit for post-order traversal of @cgroup's descendants.
+ *
+ * While this function requires RCU read locking, it doesn't require the
+ * whole traversal to be contained in a single RCU critical section.  This
+ * function will return the correct next descendant as long as both @pos
+ * and @cgroup are accessible and @pos is a descendant of @cgroup.
  */
 struct cgroup *cgroup_next_descendant_post(struct cgroup *pos,
 					   struct cgroup *cgroup)
- {
-	 struct cgroup *next;
- 
-	 WARN_ON_ONCE(!rcu_read_lock_held());
- 
-	 /* if first iteration, pretend we just visited @cgroup */
-	 if (!pos)
-		 pos = cgroup;
- 
-	 /* visit the first child if exists */
-	 next = list_first_or_null_rcu(&pos->children, struct cgroup, sibling);
-	 if (next)
-		 return next;
- 
-	 /* no child, visit my or the closest ancestor's next sibling */
-	 while (pos != cgroup) {
-		 next = list_entry_rcu(pos->sibling.next, struct cgroup,
-					   sibling);
-		 if (&next->sibling != &pos->parent->children)
-			 return next;
- 
-		 pos = pos->parent;
-	 }
- 
-	 return NULL;
- }
- EXPORT_SYMBOL_GPL(cgroup_next_descendant_pre);
- 
- /**
-  * cgroup_rightmost_descendant - return the rightmost descendant of a cgroup
-  * @pos: cgroup of interest
-  *
-  * Return the rightmost descendant of @pos.  If there's no descendant,
-  * @pos is returned.  This can be used during pre-order traversal to skip
-  * subtree of @pos.
-  */
- struct cgroup *cgroup_rightmost_descendant(struct cgroup *pos)
- {
-	 struct cgroup *last, *tmp;
- 
-	 WARN_ON_ONCE(!rcu_read_lock_held());
- 
-	 do {
-		 last = pos;
-		 /* ->prev isn't RCU safe, walk ->next till the end */
-		 pos = NULL;
-		 list_for_each_entry_rcu(tmp, &last->children, sibling)
-			 pos = tmp;
-	 } while (pos);
- 
-	 return last;
- }
- EXPORT_SYMBOL_GPL(cgroup_rightmost_descendant);
- 
- static struct cgroup *cgroup_leftmost_descendant(struct cgroup *pos)
- {
-	 struct cgroup *last;
- 
-	 do {
-		 last = pos;
-		 pos = list_first_or_null_rcu(&pos->children, struct cgroup,
-						  sibling);
-	 } while (pos);
- 
-	 return last;
- }
- 
- /**
-  * cgroup_next_descendant_post - find the next descendant for post-order walk
-  * @pos: the current position (%NULL to initiate traversal)
-  * @cgroup: cgroup whose descendants to walk
-  *
-  * To be used by cgroup_for_each_descendant_post().  Find the next
-  * descendant to visit for post-order traversal of @cgroup's descendants.
-  */
- struct cgroup *cgroup_next_descendant_post(struct cgroup *pos,
-						struct cgroup *cgroup)
- {
-	 struct cgroup *next;
- 
-	 WARN_ON_ONCE(!rcu_read_lock_held());
- 
-	 /* if first iteration, visit the leftmost descendant */
-	 if (!pos) {
-		 next = cgroup_leftmost_descendant(cgroup);
-		 return next != cgroup ? next : NULL;
-	 }
- 
-	 /* if there's an unvisited sibling, visit its leftmost descendant */
-	 next = list_entry_rcu(pos->sibling.next, struct cgroup, sibling);
-	 if (&next->sibling != &pos->parent->children)
-		 return cgroup_leftmost_descendant(next);
- 
-	 /* no sibling left, visit parent */
-	 next = pos->parent;
-	 return next != cgroup ? next : NULL;
- }
- EXPORT_SYMBOL_GPL(cgroup_next_descendant_post);
- 
- void cgroup_iter_start(struct cgroup *cgrp, struct cgroup_iter *it)
-	 __acquires(css_set_lock)
- {
-	 /*
-	  * The first time anyone tries to iterate across a cgroup,
-	  * we need to enable the list linking each css_set to its
-	  * tasks, and fix up all existing tasks.
-	  */
-	 if (!use_task_css_set_links)
-		 cgroup_enable_task_cg_lists();
- 
-	 read_lock(&css_set_lock);
-	 it->cg_link = &cgrp->css_sets;
-	 cgroup_advance_iter(cgrp, it);
- }
- 
- struct task_struct *cgroup_iter_next(struct cgroup *cgrp,
-					 struct cgroup_iter *it)
- {
-	 struct task_struct *res;
-	 struct list_head *l = it->task;
-	 struct cg_cgroup_link *link;
- 
-	 /* If the iterator cg is NULL, we have no tasks */
-	 if (!it->cg_link)
-		 return NULL;
-	 res = list_entry(l, struct task_struct, cg_list);
-	 /* Advance iterator to find next entry */
-	 l = l->next;
-	 link = list_entry(it->cg_link, struct cg_cgroup_link, cgrp_link_list);
-	 if (l == &link->cg->tasks) {
-		 /* We reached the end of this task list - move on to
-		  * the next cg_cgroup_link */
-		 cgroup_advance_iter(cgrp, it);
-	 } else {
-		 it->task = l;
-	 }
-	 return res;
- }
- 
- void cgroup_iter_end(struct cgroup *cgrp, struct cgroup_iter *it)
-	 __releases(css_set_lock)
- {
-	 read_unlock(&css_set_lock);
- }
- 
- static inline int started_after_time(struct task_struct *t1,
-					  struct timespec *time,
-					  struct task_struct *t2)
- {
-	 int start_diff = timespec_compare(&t1->start_time, time);
-	 if (start_diff > 0) {
-		 return 1;
-	 } else if (start_diff < 0) {
-		 return 0;
-	 } else {
-		 /*
-		  * Arbitrarily, if two processes started at the same
-		  * time, we'll say that the lower pointer value
-		  * started first. Note that t2 may have exited by now
-		  * so this may not be a valid pointer any longer, but
-		  * that's fine - it still serves to distinguish
-		  * between two tasks started (effectively) simultaneously.
-		  */
-		 return t1 > t2;
-	 }
- }
- 
- /*
-  * This function is a callback from heap_insert() and is used to order
-  * the heap.
-  * In this case we order the heap in descending task start time.
-  */
- static inline int started_after(void *p1, void *p2)
- {
-	 struct task_struct *t1 = p1;
-	 struct task_struct *t2 = p2;
-	 return started_after_time(t1, &t2->start_time, t2);
- }
- 
- /**
-  * cgroup_scan_tasks - iterate though all the tasks in a cgroup
-  * @scan: struct cgroup_scanner containing arguments for the scan
-  *
-  * Arguments include pointers to callback functions test_task() and
-  * process_task().
-  * Iterate through all the tasks in a cgroup, calling test_task() for each,
-  * and if it returns true, call process_task() for it also.
-  * The test_task pointer may be NULL, meaning always true (select all tasks).
-  * Effectively duplicates cgroup_iter_{start,next,end}()
-  * but does not lock css_set_lock for the call to process_task().
-  * The struct cgroup_scanner may be embedded in any structure of the caller's
-  * creation.
-  * It is guaranteed that process_task() will act on every task that
-  * is a member of the cgroup for the duration of this call. This
-  * function may or may not call process_task() for tasks that exit
-  * or move to a different cgroup during the call, or are forked or
-  * move into the cgroup during the call.
-  *
-  * Note that test_task() may be called with locks held, and may in some
-  * situations be called multiple times for the same task, so it should
-  * be cheap.
-  * If the heap pointer in the struct cgroup_scanner is non-NULL, a heap has been
-  * pre-allocated and will be used for heap operations (and its "gt" member will
-  * be overwritten), else a temporary heap will be used (allocation of which
-  * may cause this function to fail).
-  */
- int cgroup_scan_tasks(struct cgroup_scanner *scan)
- {
-	 int retval, i;
-	 struct cgroup_iter it;
-	 struct task_struct *p, *dropped;
-	 /* Never dereference latest_task, since it's not refcounted */
-	 struct task_struct *latest_task = NULL;
-	 struct ptr_heap tmp_heap;
-	 struct ptr_heap *heap;
-	 struct timespec latest_time = { 0, 0 };
- 
-	 if (scan->heap) {
-		 /* The caller supplied our heap and pre-allocated its memory */
-		 heap = scan->heap;
-		 heap->gt = &started_after;
-	 } else {
-		 /* We need to allocate our own heap memory */
-		 heap = &tmp_heap;
-		 retval = heap_init(heap, PAGE_SIZE, GFP_KERNEL, &started_after);
-		 if (retval)
-			 /* cannot allocate the heap */
-			 return retval;
-	 }
- 
-  again:
-	 /*
-	  * Scan tasks in the cgroup, using the scanner's "test_task" callback
-	  * to determine which are of interest, and using the scanner's
-	  * "process_task" callback to process any of them that need an update.
-	  * Since we don't want to hold any locks during the task updates,
-	  * gather tasks to be processed in a heap structure.
-	  * The heap is sorted by descending task start time.
-	  * If the statically-sized heap fills up, we overflow tasks that
-	  * started later, and in future iterations only consider tasks that
-	  * started after the latest task in the previous pass. This
-	  * guarantees forward progress and that we don't miss any tasks.
-	  */
-	 heap->size = 0;
-	 cgroup_iter_start(scan->cg, &it);
-	 while ((p = cgroup_iter_next(scan->cg, &it))) {
-		 /*
-		  * Only affect tasks that qualify per the caller's callback,
-		  * if he provided one
-		  */
-		 if (scan->test_task && !scan->test_task(p, scan))
-			 continue;
-		 /*
-		  * Only process tasks that started after the last task
-		  * we processed
-		  */
-		 if (!started_after_time(p, &latest_time, latest_task))
-			 continue;
-		 dropped = heap_insert(heap, p);
-		 if (dropped == NULL) {
-			 /*
-			  * The new task was inserted; the heap wasn't
-			  * previously full
-			  */
-			 get_task_struct(p);
-		 } else if (dropped != p) {
-			 /*
-			  * The new task was inserted, and pushed out a
-			  * different task
-			  */
-			 get_task_struct(p);
-			 put_task_struct(dropped);
-		 }
-		 /*
-		  * Else the new task was newer than anything already in
-		  * the heap and wasn't inserted
-		  */
-	 }
-	 cgroup_iter_end(scan->cg, &it);
- 
-	 if (heap->size) {
-		 for (i = 0; i < heap->size; i++) {
-			 struct task_struct *q = heap->ptrs[i];
-			 if (i == 0) {
-				 latest_time = q->start_time;
-				 latest_task = q;
-			 }
-			 /* Process the task per the caller's callback */
-			 scan->process_task(q, scan);
-			 put_task_struct(q);
-		 }
-		 /*
-		  * If we had to process any tasks at all, scan again
-		  * in case some of them were in the middle of forking
-		  * children that didn't get processed.
-		  * Not the most efficient way to do it, but it avoids
-		  * having to take callback_mutex in the fork path
-		  */
-		 goto again;
-	 }
-	 if (heap == &tmp_heap)
-		 heap_free(&tmp_heap);
-	 return 0;
- }
- 
- static void cgroup_transfer_one_task(struct task_struct *task,
-					  struct cgroup_scanner *scan)
- {
-	 struct cgroup *new_cgroup = scan->data;
- 
-	 mutex_lock(&cgroup_mutex);
-	 cgroup_attach_task(new_cgroup, task, false);
-	 mutex_unlock(&cgroup_mutex);
- }
- 
- /**
-  * cgroup_trasnsfer_tasks - move tasks from one cgroup to another
-  * @to: cgroup to which the tasks will be moved
-  * @from: cgroup in which the tasks currently reside
-  */
- int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from)
- {
-	 struct cgroup_scanner scan;
- 
-	 scan.cg = from;
-	 scan.test_task = NULL; /* select all tasks in cgroup */
-	 scan.process_task = cgroup_transfer_one_task;
-	 scan.heap = NULL;
-	 scan.data = to;
- 
-	 return cgroup_scan_tasks(&scan);
- }
- 
- /*
-  * Stuff for reading the 'tasks'/'procs' files.
-  *
-  * Reading this file can return large amounts of data if a cgroup has
-  * *lots* of attached tasks. So it may need several calls to read(),
-  * but we cannot guarantee that the information we produce is correct
-  * unless we produce it entirely atomically.
-  *
-  */
- 
- /* which pidlist file are we talking about? */
- enum cgroup_filetype {
-	 CGROUP_FILE_PROCS,
-	 CGROUP_FILE_TASKS,
- };
- 
- /*
-  * A pidlist is a list of pids that virtually represents the contents of one
-  * of the cgroup files ("procs" or "tasks"). We keep a list of such pidlists,
-  * a pair (one each for procs, tasks) for each pid namespace that's relevant
-  * to the cgroup.
-  */
- struct cgroup_pidlist {
-	 /*
-	  * used to find which pidlist is wanted. doesn't change as long as
-	  * this particular list stays in the list.
+{
+	struct cgroup *next;
+
+	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	/* if first iteration, visit the leftmost descendant */
+	if (!pos) {
+		next = cgroup_leftmost_descendant(cgroup);
+		return next != cgroup ? next : NULL;
+	}
+
+	/* if there's an unvisited sibling, visit its leftmost descendant */
+	next = cgroup_next_sibling(pos);
+	if (next)
+		return cgroup_leftmost_descendant(next);
+
+	/* no sibling left, visit parent */
+	next = pos->parent;
+	return next != cgroup ? next : NULL;
+}
+EXPORT_SYMBOL_GPL(cgroup_next_descendant_post);
+
+void cgroup_iter_start(struct cgroup *cgrp, struct cgroup_iter *it)
+	__acquires(css_set_lock)
+{
+	/*
+	 * The first time anyone tries to iterate across a cgroup,
+	 * we need to enable the list linking each css_set to its
+	 * tasks, and fix up all existing tasks.
 	 */
 	 struct { enum cgroup_filetype type; struct pid_namespace *ns; } key;
 	 /* array of xids */
