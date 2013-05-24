@@ -4218,7 +4218,56 @@ struct cgroup_subsys_state *css_next_child(struct cgroup_subsys_state *pos,
 }
 
 /**
- * css_next_descendant_pre - find the next descendant for pre-order walk
+ * cgroup_next_sibling - find the next sibling of a given cgroup
+ * @pos: the current cgroup
+ *
+ * This function returns the next sibling of @pos and should be called
+ * under RCU read lock.  The only requirement is that @pos is accessible.
+ * The next sibling is guaranteed to be returned regardless of @pos's
+ * state.
+ */
+struct cgroup *cgroup_next_sibling(struct cgroup *pos)
+{
+	struct cgroup *next;
+
+	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	/*
+	 * @pos could already have been removed.  Once a cgroup is removed,
+	 * its ->sibling.next is no longer updated when its next sibling
+	 * changes.  As CGRP_REMOVED is set on removal which is fully
+	 * serialized, if we see it unasserted, it's guaranteed that the
+	 * next sibling hasn't finished its grace period even if it's
+	 * already removed, and thus safe to dereference from this RCU
+	 * critical section.  If ->sibling.next is inaccessible,
+	 * cgroup_is_removed() is guaranteed to be visible as %true here.
+	 */
+	if (likely(!cgroup_is_removed(pos))) {
+		next = list_entry_rcu(pos->sibling.next, struct cgroup, sibling);
+		if (&next->sibling != &pos->parent->children)
+			return next;
+		return NULL;
+	}
+
+	/*
+	 * Can't dereference the next pointer.  Each cgroup is given a
+	 * monotonically increasing unique serial number and always
+	 * appended to the sibling list, so the next one can be found by
+	 * walking the parent's children until we see a cgroup with higher
+	 * serial number than @pos's.
+	 *
+	 * While this path can be slow, it's taken only when either the
+	 * current cgroup is removed or iteration and removal race.
+	 */
+	list_for_each_entry_rcu(next, &pos->parent->children, sibling)
+		if (next->serial_nr > pos->serial_nr)
+			return next;
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(cgroup_next_sibling);
+
+/**
+ * cgroup_next_descendant_pre - find the next descendant for pre-order walk
  * @pos: the current position (%NULL to initiate traversal)
  * @root: css whose descendants to walk
  *
@@ -5437,10 +5486,13 @@ err_free_css:
  */
 static struct cgroup *cgroup_create(struct cgroup *parent)
 {
-	struct cgroup_root *root = parent->root;
-	struct cgroup *cgrp, *tcgrp;
-	int level = parent->level + 1;
-	int ret;
+	static atomic64_t serial_nr_cursor = ATOMIC64_INIT(0);
+	struct cgroup *cgrp;
+	struct cgroup_name *name;
+	struct cgroupfs_root *root = parent->root;
+	int err = 0;
+	struct cgroup_subsys *ss;
+	struct super_block *sb = root->sb;
 
 	/* allocate the cgroup and its ID, 0 is reserved for the root */
 	cgrp = kzalloc(sizeof(*cgrp) +
@@ -5484,6 +5536,14 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 
 	cgrp->self.serial_nr = css_serial_nr_next++;
 
+	/*
+	 * Assign a monotonically increasing serial number.  With the list
+	 * appending below, it guarantees that sibling cgroups are always
+	 * sorted in the ascending serial number order on the parent's
+	 * ->children.
+	 */
+	cgrp->serial_nr = atomic64_inc_return(&serial_nr_cursor);
+
 	/* allocation complete, commit to creation */
 	list_add_tail_rcu(&cgrp->self.sibling, &cgroup_parent(cgrp)->self.children);
 	atomic_inc(&root->nr_cgrps);
@@ -5515,8 +5575,92 @@ out_free_cgrp:
 	return ERR_PTR(ret);
 }
 
-static int cgroup_mkdir(struct kernfs_node *parent_kn, const char *name,
-			umode_t mode)
+static int cgroup_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	struct cgroup *c_parent = dentry->d_parent->d_fsdata;
+
+	/* the vfs holds inode->i_mutex already */
+	return cgroup_create(c_parent, dentry, mode | S_IFDIR);
+}
+
+static int cgroup_destroy_locked(struct cgroup *cgrp)
+	__releases(&cgroup_mutex) __acquires(&cgroup_mutex)
+{
+	struct dentry *d = cgrp->dentry;
+	struct cgroup *parent = cgrp->parent;
+	struct cgroup_event *event, *tmp;
+	struct cgroup_subsys *ss;
+
+	lockdep_assert_held(&d->d_inode->i_mutex);
+	lockdep_assert_held(&cgroup_mutex);
+
+	if (atomic_read(&cgrp->count) || !list_empty(&cgrp->children))
+		return -EBUSY;
+
+	/*
+	 * Block new css_tryget() by deactivating refcnt and mark @cgrp
+	 * removed.  This makes future css_tryget() and child creation
+	 * attempts fail thus maintaining the removal conditions verified
+	 * above.
+	 *
+	 * Note that CGRP_REMVOED clearing is depended upon by
+	 * cgroup_next_sibling() to resume iteration after dropping RCU
+	 * read lock.  See cgroup_next_sibling() for details.
+	 */
+	for_each_subsys(cgrp->root, ss) {
+		struct cgroup_subsys_state *css = cgrp->subsys[ss->subsys_id];
+
+		WARN_ON(atomic_read(&css->refcnt) < 0);
+		atomic_add(CSS_DEACT_BIAS, &css->refcnt);
+	}
+	set_bit(CGRP_REMOVED, &cgrp->flags);
+
+	/* tell subsystems to initate destruction */
+	for_each_subsys(cgrp->root, ss)
+		offline_css(ss, cgrp);
+
+	/*
+	 * Put all the base refs.  Each css holds an extra reference to the
+	 * cgroup's dentry and cgroup removal proceeds regardless of css
+	 * refs.  On the last put of each css, whenever that may be, the
+	 * extra dentry ref is put so that dentry destruction happens only
+	 * after all css's are released.
+	 */
+	for_each_subsys(cgrp->root, ss)
+		css_put(cgrp->subsys[ss->subsys_id]);
+
+	raw_spin_lock(&release_list_lock);
+	if (!list_empty(&cgrp->release_list))
+		list_del_init(&cgrp->release_list);
+	raw_spin_unlock(&release_list_lock);
+
+	/* delete this cgroup from parent->children */
+	list_del_rcu(&cgrp->sibling);
+	list_del_init(&cgrp->allcg_node);
+
+	dget(d);
+	cgroup_d_remove_dir(d);
+	dput(d);
+
+	set_bit(CGRP_RELEASABLE, &parent->flags);
+	check_for_release(parent);
+
+	/*
+	 * Unregister events and notify userspace.
+	 * Notify userspace about cgroup removing only after rmdir of cgroup
+	 * directory to avoid race between userspace and kernelspace.
+	 */
+	spin_lock(&cgrp->event_list_lock);
+	list_for_each_entry_safe(event, tmp, &cgrp->event_list, list) {
+		list_del_init(&event->list);
+		schedule_work(&event->remove);
+	}
+	spin_unlock(&cgrp->event_list_lock);
+
+	return 0;
+}
+
+static int cgroup_rmdir(struct inode *unused_dir, struct dentry *dentry)
 {
 	struct cgroup *parent, *cgrp;
 	struct kernfs_node *kn;

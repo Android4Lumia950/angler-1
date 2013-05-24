@@ -134,10 +134,280 @@ void css_task_iter_start(struct cgroup_subsys_state *css,
 struct task_struct *css_task_iter_next(struct css_task_iter *it);
 void css_task_iter_end(struct css_task_iter *it);
 
-/**
- * css_for_each_child - iterate through children of a css
- * @pos: the css * to use as the loop cursor
- * @parent: css whose children to walk
+/*
+ * css_put() should be called to release a reference taken by
+ * css_get() or css_tryget()
+ */
+
+extern void __css_put(struct cgroup_subsys_state *css);
+static inline void css_put(struct cgroup_subsys_state *css)
+{
+	if (!(css->flags & CSS_ROOT))
+		__css_put(css);
+}
+
+/* bits in struct cgroup flags field */
+enum {
+	/* Control Group is dead */
+	CGRP_REMOVED,
+	/*
+	 * Control Group has previously had a child cgroup or a task,
+	 * but no longer (only if CGRP_NOTIFY_ON_RELEASE is set)
+	 */
+	CGRP_RELEASABLE,
+	/* Control Group requires release notifications to userspace */
+	CGRP_NOTIFY_ON_RELEASE,
+	/*
+	 * Clone the parent's configuration when creating a new child
+	 * cpuset cgroup.  For historical reasons, this option can be
+	 * specified at mount time and thus is implemented here.
+	 */
+	CGRP_CPUSET_CLONE_CHILDREN,
+	/* see the comment above CGRP_ROOT_SANE_BEHAVIOR for details */
+	CGRP_SANE_BEHAVIOR,
+};
+
+struct cgroup_name {
+	struct rcu_head rcu_head;
+	char name[];
+};
+
+struct cgroup {
+	unsigned long flags;		/* "unsigned long" so bitops work */
+
+	/*
+	 * count users of this cgroup. >0 means busy, but doesn't
+	 * necessarily indicate the number of tasks in the cgroup
+	 */
+	atomic_t count;
+
+	int id;				/* ida allocated in-hierarchy ID */
+
+	/*
+	 * We link our 'sibling' struct into our parent's 'children'.
+	 * Our children link their 'sibling' into our 'children'.
+	 */
+	struct list_head sibling;	/* my parent's children */
+	struct list_head children;	/* my children */
+	struct list_head files;		/* my files */
+
+	struct cgroup *parent;		/* my parent */
+	struct dentry *dentry;		/* cgroup fs entry, RCU protected */
+
+	/*
+	 * Monotonically increasing unique serial number which defines a
+	 * uniform order among all cgroups.  It's guaranteed that all
+	 * ->children lists are in the ascending order of ->serial_nr.
+	 * It's used to allow interrupting and resuming iterations.
+	 */
+	u64 serial_nr;
+
+	/*
+	 * This is a copy of dentry->d_name, and it's needed because
+	 * we can't use dentry->d_name in cgroup_path().
+	 *
+	 * You must acquire rcu_read_lock() to access cgrp->name, and
+	 * the only place that can change it is rename(), which is
+	 * protected by parent dir's i_mutex.
+	 *
+	 * Normally you should use cgroup_name() wrapper rather than
+	 * access it directly.
+	 */
+	struct cgroup_name __rcu *name;
+
+	/* Private pointers for each registered subsystem */
+	struct cgroup_subsys_state *subsys[CGROUP_SUBSYS_COUNT];
+
+	struct cgroupfs_root *root;
+
+	/*
+	 * List of cg_cgroup_links pointing at css_sets with
+	 * tasks in this cgroup. Protected by css_set_lock
+	 */
+	struct list_head css_sets;
+
+	struct list_head allcg_node;	/* cgroupfs_root->allcg_list */
+	struct list_head cft_q_node;	/* used during cftype add/rm */
+
+	/*
+	 * Linked list running through all cgroups that can
+	 * potentially be reaped by the release agent. Protected by
+	 * release_list_lock
+	 */
+	struct list_head release_list;
+
+	/*
+	 * list of pidlists, up to two for each namespace (one for procs, one
+	 * for tasks); created on demand.
+	 */
+	struct list_head pidlists;
+	struct mutex pidlist_mutex;
+
+	/* For RCU-protected deletion */
+	struct rcu_head rcu_head;
+	struct work_struct free_work;
+
+	/* List of events which userspace want to receive */
+	struct list_head event_list;
+	spinlock_t event_list_lock;
+
+	/* directory xattrs */
+	struct simple_xattrs xattrs;
+};
+
+#define MAX_CGROUP_ROOT_NAMELEN 64
+
+/* cgroupfs_root->flags */
+enum {
+	/*
+	 * Unfortunately, cgroup core and various controllers are riddled
+	 * with idiosyncrasies and pointless options.  The following flag,
+	 * when set, will force sane behavior - some options are forced on,
+	 * others are disallowed, and some controllers will change their
+	 * hierarchical or other behaviors.
+	 *
+	 * The set of behaviors affected by this flag are still being
+	 * determined and developed and the mount option for this flag is
+	 * prefixed with __DEVEL__.  The prefix will be dropped once we
+	 * reach the point where all behaviors are compatible with the
+	 * planned unified hierarchy, which will automatically turn on this
+	 * flag.
+	 *
+	 * The followings are the behaviors currently affected this flag.
+	 *
+	 * - Mount options "noprefix" and "clone_children" are disallowed.
+	 *   Also, cgroupfs file cgroup.clone_children is not created.
+	 *
+	 * - When mounting an existing superblock, mount options should
+	 *   match.
+	 *
+	 * - Remount is disallowed.
+	 *
+	 * - cpuset: tasks will be kept in empty cpusets when hotplug happens
+	 *   and take masks of ancestors with non-empty cpus/mems, instead of
+	 *   being moved to an ancestor.
+	 *
+	 * - cpuset: a task can be moved into an empty cpuset, and again it
+	 *   takes masks of ancestors.
+	 *
+	 * - memcg: use_hierarchy is on by default and the cgroup file for
+	 *   the flag is not created.
+	 *
+	 * The followings are planned changes.
+	 *
+	 * - release_agent will be disallowed once replacement notification
+	 *   mechanism is implemented.
+	 */
+	CGRP_ROOT_SANE_BEHAVIOR	= (1 << 0),
+
+	CGRP_ROOT_NOPREFIX	= (1 << 1), /* mounted subsystems have no named prefix */
+	CGRP_ROOT_XATTR		= (1 << 2), /* supports extended attributes */
+};
+
+/*
+ * A cgroupfs_root represents the root of a cgroup hierarchy, and may be
+ * associated with a superblock to form an active hierarchy.  This is
+ * internal to cgroup core.  Don't access directly from controllers.
+ */
+struct cgroupfs_root {
+	struct super_block *sb;
+
+	/*
+	 * The bitmask of subsystems intended to be attached to this
+	 * hierarchy
+	 */
+	unsigned long subsys_mask;
+
+	/* Unique id for this hierarchy. */
+	int hierarchy_id;
+
+	/* The bitmask of subsystems currently attached to this hierarchy */
+	unsigned long actual_subsys_mask;
+
+	/* A list running through the attached subsystems */
+	struct list_head subsys_list;
+
+	/* The root cgroup for this hierarchy */
+	struct cgroup top_cgroup;
+
+	/* Tracks how many cgroups are currently defined in hierarchy.*/
+	int number_of_cgroups;
+
+	/* A list running through the active hierarchies */
+	struct list_head root_list;
+
+	/* All cgroups on this root, cgroup_mutex protected */
+	struct list_head allcg_list;
+
+	/* Hierarchy-specific flags */
+	unsigned long flags;
+
+	/* IDs for cgroups in this hierarchy */
+	struct ida cgroup_ida;
+
+	/* The path to use for release notifications. */
+	char release_agent_path[PATH_MAX];
+
+	/* The name for this hierarchy - may be empty */
+	char name[MAX_CGROUP_ROOT_NAMELEN];
+};
+
+/*
+ * A css_set is a structure holding pointers to a set of
+ * cgroup_subsys_state objects. This saves space in the task struct
+ * object and speeds up fork()/exit(), since a single inc/dec and a
+ * list_add()/del() can bump the reference count on the entire cgroup
+ * set for a task.
+ */
+
+struct css_set {
+
+	/* Reference count */
+	atomic_t refcount;
+
+	/*
+	 * List running through all cgroup groups in the same hash
+	 * slot. Protected by css_set_lock
+	 */
+	struct hlist_node hlist;
+
+	/*
+	 * List running through all tasks using this cgroup
+	 * group. Protected by css_set_lock
+	 */
+	struct list_head tasks;
+
+	/*
+	 * List of cg_cgroup_link objects on link chains from
+	 * cgroups referenced from this css_set. Protected by
+	 * css_set_lock
+	 */
+	struct list_head cg_links;
+
+	/*
+	 * Set of subsystem states, one for each subsystem. This array
+	 * is immutable after creation apart from the init_css_set
+	 * during subsystem registration (at boot time) and modular subsystem
+	 * loading/unloading.
+	 */
+	struct cgroup_subsys_state *subsys[CGROUP_SUBSYS_COUNT];
+
+	/* For RCU-protected deletion */
+	struct rcu_head rcu_head;
+};
+
+/*
+ * cgroup_map_cb is an abstract callback API for reporting map-valued
+ * control files
+ */
+
+struct cgroup_map_cb {
+	int (*fill)(struct cgroup_map_cb *cb, const char *key, u64 value);
+	void *state;
+};
+
+/*
+ * struct cftype: handler definitions for cgroup control files
  *
  * Walk @parent's children.  Must be called under rcu_read_lock().
  *
@@ -446,6 +716,8 @@ static inline struct cgroup_subsys_state *task_css(struct task_struct *task,
 {
 	return task_css_check(task, subsys_id, false);
 }
+
+struct cgroup *cgroup_next_sibling(struct cgroup *pos);
 
 /**
  * task_css_is_root - test whether a task belongs to the root css
