@@ -5113,60 +5113,18 @@ static int cgroup_write_notify_on_release(struct cgroup_subsys_state *css,
 	return 0;
 }
 
-static u64 cgroup_clone_children_read(struct cgroup_subsys_state *css,
-				      struct cftype *cft)
-{
-	return test_bit(CGRP_CPUSET_CLONE_CHILDREN, &css->cgroup->flags);
-}
-
-static int cgroup_clone_children_write(struct cgroup_subsys_state *css,
-				       struct cftype *cft, u64 val)
-{
-	if (val)
-		set_bit(CGRP_CPUSET_CLONE_CHILDREN, &css->cgroup->flags);
-	else
-		clear_bit(CGRP_CPUSET_CLONE_CHILDREN, &css->cgroup->flags);
-	return 0;
-}
-
-/* cgroup core interface files for the default hierarchy */
-static struct cftype cgroup_dfl_base_files[] = {
+static struct cftype cgroup_base_files[] = {
 	{
-		.name = "tasks",
-		.flags = CFTYPE_INSANE,		/* use "procs" instead */
-		.open = cgroup_tasks_open,
-		.write_u64 = cgroup_tasks_write,
+		.name = "cgroup.procs",
+		.open = cgroup_procs_open,
+		.write_u64 = cgroup_procs_write,
 		.release = cgroup_pidlist_release,
 		.mode = S_IRUGO | S_IWUSR,
 	},
 	{
-		.name = "cgroup.controllers",
-		.seq_show = cgroup_controllers_show,
-	},
-	{
-		.name = "cgroup.subtree_control",
-		.seq_show = cgroup_subtree_control_show,
-		.write = cgroup_subtree_control_write,
-	},
-	{
-		.name = "cgroup.events",
-		.flags = CFTYPE_NOT_ON_ROOT,
-		.file_offset = offsetof(struct cgroup, events_file),
-		.seq_show = cgroup_events_show,
-	},
-	{ }	/* terminate */
-};
-
-/* cgroup core interface files for the legacy hierarchies */
-static struct cftype cgroup_legacy_base_files[] = {
-	{
-		.name = "cgroup.procs",
-		.seq_start = cgroup_pidlist_start,
-		.seq_next = cgroup_pidlist_next,
-		.seq_stop = cgroup_pidlist_stop,
-		.seq_show = cgroup_pidlist_show,
-		.private = CGROUP_FILE_PROCS,
-		.write = cgroup_procs_write,
+		.name = "cgroup.event_control",
+		.write_string = cgroup_write_event_control,
+		.mode = S_IWUGO,
 	},
 	{
 		.name = "cgroup.clone_children",
@@ -5186,6 +5144,26 @@ static struct cftype cgroup_legacy_base_files[] = {
 		.seq_show = cgroup_pidlist_show,
 		.private = CGROUP_FILE_TASKS,
 		.write = cgroup_tasks_write,
+	},
+	{
+		.name = "notify_on_release",
+		.flags = CFTYPE_INSANE,
+		.read_u64 = cgroup_read_notify_on_release,
+		.write_u64 = cgroup_write_notify_on_release,
+	},
+
+	/*
+	 * Historical crazy stuff.  These don't have "cgroup."  prefix and
+	 * don't exist if sane_behavior.  If you're depending on these, be
+	 * prepared to be burned.
+	 */
+	{
+		.name = "tasks",
+		.flags = CFTYPE_INSANE,		/* use "procs" instead */
+		.open = cgroup_tasks_open,
+		.write_u64 = cgroup_tasks_write,
+		.release = cgroup_pidlist_release,
+		.mode = S_IRUGO | S_IWUSR,
 	},
 	{
 		.name = "notify_on_release",
@@ -5225,7 +5203,44 @@ static struct cftype cgroup_legacy_base_files[] = {
  * and thus involve punting to css->destroy_work adding two additional
  * steps to the already complex sequence.
  */
-static void css_free_work_fn(struct work_struct *work)
+static int cgroup_populate_dir(struct cgroup *cgrp, bool base_files,
+			       unsigned long subsys_mask)
+{
+	int err;
+	struct cgroup_subsys *ss;
+
+	if (base_files) {
+		err = cgroup_addrm_files(cgrp, NULL, cgroup_base_files, true);
+		if (err < 0)
+			return err;
+	}
+
+	/* process cftsets of each subsystem */
+	for_each_subsys(cgrp->root, ss) {
+		struct cftype_set *set;
+		if (!test_bit(ss->subsys_id, &subsys_mask))
+			continue;
+
+		list_for_each_entry(set, &ss->cftsets, node)
+			cgroup_addrm_files(cgrp, ss, set->cfts, true);
+	}
+
+	/* This cgroup is ready now */
+	for_each_subsys(cgrp->root, ss) {
+		struct cgroup_subsys_state *css = cgrp->subsys[ss->subsys_id];
+		/*
+		 * Update id->css pointer and make this css visible from
+		 * CSS ID functions. This pointer will be dereferened
+		 * from RCU-read-side without locks.
+		 */
+		if (css->id)
+			rcu_assign_pointer(css->id->css, css);
+	}
+
+	return 0;
+}
+
+static void css_dput_fn(struct work_struct *work)
 {
 	struct cgroup_subsys_state *css =
 		container_of(work, struct cgroup_subsys_state, destroy_work);
