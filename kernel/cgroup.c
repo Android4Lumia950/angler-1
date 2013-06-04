@@ -5132,14 +5132,12 @@ static int cgroup_clone_children_write(struct cgroup_subsys_state *css,
 /* cgroup core interface files for the default hierarchy */
 static struct cftype cgroup_dfl_base_files[] = {
 	{
-		.name = "cgroup.procs",
-		.file_offset = offsetof(struct cgroup, procs_file),
-		.seq_start = cgroup_pidlist_start,
-		.seq_next = cgroup_pidlist_next,
-		.seq_stop = cgroup_pidlist_stop,
-		.seq_show = cgroup_pidlist_show,
-		.private = CGROUP_FILE_PROCS,
-		.write = cgroup_procs_write,
+		.name = "tasks",
+		.flags = CFTYPE_INSANE,		/* use "procs" instead */
+		.open = cgroup_tasks_open,
+		.write_u64 = cgroup_tasks_write,
+		.release = cgroup_pidlist_release,
+		.mode = S_IRUGO | S_IWUSR,
 	},
 	{
 		.name = "cgroup.controllers",
