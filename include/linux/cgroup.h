@@ -92,54 +92,46 @@ struct cgroup *cgroup_get_from_fd(int fd);
 int cgroup_attach_task_all(struct task_struct *from, struct task_struct *);
 int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from);
 
-int cgroup_add_dfl_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
-int cgroup_add_legacy_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
-int cgroup_rm_cftypes(struct cftype *cfts);
-void cgroup_file_notify(struct cgroup_file *cfile);
-
-int task_cgroup_path(struct task_struct *task, char *buf, size_t buflen);
-int cgroupstats_build(struct cgroupstats *stats, struct dentry *dentry);
-int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
-		     struct pid *pid, struct task_struct *tsk);
-
-void cgroup_fork(struct task_struct *p);
-extern int cgroup_can_fork(struct task_struct *p);
-extern void cgroup_cancel_fork(struct task_struct *p);
-extern void cgroup_post_fork(struct task_struct *p);
-void cgroup_exit(struct task_struct *p);
-void cgroup_free(struct task_struct *p);
-
-int cgroup_init_early(void);
-int cgroup_init(void);
-
-/*
- * Iteration helpers and macros.
+/**
+ * css_get - obtain a reference on the specified css
+ * @css: target css
+ *
+ * The caller must already have a reference.
  */
+static inline void css_get(struct cgroup_subsys_state *css)
+{
+	/* We don't need to reference count the root state */
+	if (!(css->flags & CSS_ROOT))
+		atomic_inc(&css->refcnt);
+}
 
-struct cgroup_subsys_state *css_next_child(struct cgroup_subsys_state *pos,
-					   struct cgroup_subsys_state *parent);
-struct cgroup_subsys_state *css_next_descendant_pre(struct cgroup_subsys_state *pos,
-						    struct cgroup_subsys_state *css);
-struct cgroup_subsys_state *css_rightmost_descendant(struct cgroup_subsys_state *pos);
-struct cgroup_subsys_state *css_next_descendant_post(struct cgroup_subsys_state *pos,
-						     struct cgroup_subsys_state *css);
+extern bool __css_tryget(struct cgroup_subsys_state *css);
 
-struct task_struct *cgroup_taskset_first(struct cgroup_taskset *tset,
-					 struct cgroup_subsys_state **dst_cssp);
-struct task_struct *cgroup_taskset_next(struct cgroup_taskset *tset,
-					struct cgroup_subsys_state **dst_cssp);
-
-void css_task_iter_start(struct cgroup_subsys_state *css,
-			 struct css_task_iter *it);
-struct task_struct *css_task_iter_next(struct css_task_iter *it);
-void css_task_iter_end(struct css_task_iter *it);
-
-/*
- * css_put() should be called to release a reference taken by
- * css_get() or css_tryget()
+/**
+ * css_tryget - try to obtain a reference on the specified css
+ * @css: target css
+ *
+ * Obtain a reference on @css if it's alive.  The caller naturally needs to
+ * ensure that @css is accessible but doesn't have to be holding a
+ * reference on it - IOW, RCU protected access is good enough for this
+ * function.  Returns %true if a reference count was successfully obtained;
+ * %false otherwise.
  */
+static inline bool css_tryget(struct cgroup_subsys_state *css)
+{
+	if (css->flags & CSS_ROOT)
+		return true;
+	return __css_tryget(css);
+}
 
 extern void __css_put(struct cgroup_subsys_state *css);
+
+/**
+ * css_put - put a css reference
+ * @css: target css
+ *
+ * Put a reference obtained via css_get() and css_tryget().
+ */
 static inline void css_put(struct cgroup_subsys_state *css)
 {
 	if (!(css->flags & CSS_ROOT))
