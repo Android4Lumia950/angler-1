@@ -999,8 +999,8 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 	if (cset)
 		return cset;
 
-	res = kmalloc(sizeof(*res), GFP_KERNEL);
-	if (!res)
+	cset = kzalloc(sizeof(*cset), GFP_KERNEL);
+	if (!cset)
 		return NULL;
 
 	/* Allocate all the cgrp_cset_link objects that we'll need */
@@ -3070,6 +3070,261 @@ static ssize_t cgroup_procs_write(struct kernfs_open_file *of,
 static ssize_t cgroup_release_agent_write(struct kernfs_open_file *of,
 					  char *buf, size_t nbytes, loff_t off)
 {
+	BUILD_BUG_ON(sizeof(cgrp->root->release_agent_path) < PATH_MAX);
+	if (strlen(buffer) >= PATH_MAX)
+		return -EINVAL;
+	if (!cgroup_lock_live_group(cgrp))
+		return -ENODEV;
+	mutex_lock(&cgroup_root_mutex);
+	strcpy(cgrp->root->release_agent_path, buffer);
+	mutex_unlock(&cgroup_root_mutex);
+	mutex_unlock(&cgroup_mutex);
+	return 0;
+}
+
+static int cgroup_release_agent_show(struct cgroup *cgrp, struct cftype *cft,
+				     struct seq_file *seq)
+{
+	if (!cgroup_lock_live_group(cgrp))
+		return -ENODEV;
+	seq_puts(seq, cgrp->root->release_agent_path);
+	seq_putc(seq, '\n');
+	mutex_unlock(&cgroup_mutex);
+	return 0;
+}
+
+static int cgroup_sane_behavior_show(struct cgroup *cgrp, struct cftype *cft,
+				     struct seq_file *seq)
+{
+	seq_printf(seq, "%d\n", cgroup_sane_behavior(cgrp));
+	return 0;
+}
+
+/* A buffer size big enough for numbers or short strings */
+#define CGROUP_LOCAL_BUFFER_SIZE 64
+
+static ssize_t cgroup_write_X64(struct cgroup *cgrp, struct cftype *cft,
+				struct file *file,
+				const char __user *userbuf,
+				size_t nbytes, loff_t *unused_ppos)
+{
+	char buffer[CGROUP_LOCAL_BUFFER_SIZE];
+	int retval = 0;
+	char *end;
+
+	if (!nbytes)
+		return -EINVAL;
+	if (nbytes >= sizeof(buffer))
+		return -E2BIG;
+	if (copy_from_user(buffer, userbuf, nbytes))
+		return -EFAULT;
+
+	buffer[nbytes] = 0;     /* nul-terminate */
+	if (cft->write_u64) {
+		u64 val = simple_strtoull(strstrip(buffer), &end, 0);
+		if (*end)
+			return -EINVAL;
+		retval = cft->write_u64(cgrp, cft, val);
+	} else {
+		s64 val = simple_strtoll(strstrip(buffer), &end, 0);
+		if (*end)
+			return -EINVAL;
+		retval = cft->write_s64(cgrp, cft, val);
+	}
+	if (!retval)
+		retval = nbytes;
+	return retval;
+}
+
+static ssize_t cgroup_write_string(struct cgroup *cgrp, struct cftype *cft,
+				   struct file *file,
+				   const char __user *userbuf,
+				   size_t nbytes, loff_t *unused_ppos)
+{
+	char local_buffer[CGROUP_LOCAL_BUFFER_SIZE];
+	int retval = 0;
+	size_t max_bytes = cft->max_write_len;
+	char *buffer = local_buffer;
+
+	if (!max_bytes)
+		max_bytes = sizeof(local_buffer) - 1;
+	if (nbytes >= max_bytes)
+		return -E2BIG;
+	/* Allocate a dynamic buffer if we need one */
+	if (nbytes >= sizeof(local_buffer)) {
+		buffer = kmalloc(nbytes + 1, GFP_KERNEL);
+		if (buffer == NULL)
+			return -ENOMEM;
+	}
+	if (nbytes && copy_from_user(buffer, userbuf, nbytes)) {
+		retval = -EFAULT;
+		goto out;
+	}
+
+	buffer[nbytes] = 0;     /* nul-terminate */
+	retval = cft->write_string(cgrp, cft, strstrip(buffer));
+	if (!retval)
+		retval = nbytes;
+out:
+	if (buffer != local_buffer)
+		kfree(buffer);
+	return retval;
+}
+
+static ssize_t cgroup_file_write(struct file *file, const char __user *buf,
+						size_t nbytes, loff_t *ppos)
+{
+	struct cftype *cft = __d_cft(file->f_dentry);
+	struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
+
+	if (cgroup_is_removed(cgrp))
+		return -ENODEV;
+	if (cft->write)
+		return cft->write(cgrp, cft, file, buf, nbytes, ppos);
+	if (cft->write_u64 || cft->write_s64)
+		return cgroup_write_X64(cgrp, cft, file, buf, nbytes, ppos);
+	if (cft->write_string)
+		return cgroup_write_string(cgrp, cft, file, buf, nbytes, ppos);
+	if (cft->trigger) {
+		int ret = cft->trigger(cgrp, (unsigned int)cft->private);
+		return ret ? ret : nbytes;
+	}
+	return -EINVAL;
+}
+
+static ssize_t cgroup_read_u64(struct cgroup *cgrp, struct cftype *cft,
+			       struct file *file,
+			       char __user *buf, size_t nbytes,
+			       loff_t *ppos)
+{
+	char tmp[CGROUP_LOCAL_BUFFER_SIZE];
+	u64 val = cft->read_u64(cgrp, cft);
+	int len = sprintf(tmp, "%llu\n", (unsigned long long) val);
+
+	return simple_read_from_buffer(buf, nbytes, ppos, tmp, len);
+}
+
+static ssize_t cgroup_read_s64(struct cgroup *cgrp, struct cftype *cft,
+			       struct file *file,
+			       char __user *buf, size_t nbytes,
+			       loff_t *ppos)
+{
+	char tmp[CGROUP_LOCAL_BUFFER_SIZE];
+	s64 val = cft->read_s64(cgrp, cft);
+	int len = sprintf(tmp, "%lld\n", (long long) val);
+
+	return simple_read_from_buffer(buf, nbytes, ppos, tmp, len);
+}
+
+static ssize_t cgroup_file_read(struct file *file, char __user *buf,
+				   size_t nbytes, loff_t *ppos)
+{
+	struct cftype *cft = __d_cft(file->f_dentry);
+	struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
+
+	if (cgroup_is_removed(cgrp))
+		return -ENODEV;
+
+	if (cft->read)
+		return cft->read(cgrp, cft, file, buf, nbytes, ppos);
+	if (cft->read_u64)
+		return cgroup_read_u64(cgrp, cft, file, buf, nbytes, ppos);
+	if (cft->read_s64)
+		return cgroup_read_s64(cgrp, cft, file, buf, nbytes, ppos);
+	return -EINVAL;
+}
+
+/*
+ * seqfile ops/methods for returning structured data. Currently just
+ * supports string->u64 maps, but can be extended in future.
+ */
+
+struct cgroup_seqfile_state {
+	struct cftype *cft;
+	struct cgroup *cgroup;
+};
+
+static int cgroup_map_add(struct cgroup_map_cb *cb, const char *key, u64 value)
+{
+	struct seq_file *sf = cb->state;
+	return seq_printf(sf, "%s %llu\n", key, (unsigned long long)value);
+}
+
+static int cgroup_seqfile_show(struct seq_file *m, void *arg)
+{
+	struct cgroup_seqfile_state *state = m->private;
+	struct cftype *cft = state->cft;
+	if (cft->read_map) {
+		struct cgroup_map_cb cb = {
+			.fill = cgroup_map_add,
+			.state = m,
+		};
+		return cft->read_map(state->cgroup, cft, &cb);
+	}
+	return cft->read_seq_string(state->cgroup, cft, m);
+}
+
+static int cgroup_seqfile_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+	kfree(seq->private);
+	return single_release(inode, file);
+}
+
+static const struct file_operations cgroup_seqfile_operations = {
+	.read = seq_read,
+	.write = cgroup_file_write,
+	.llseek = seq_lseek,
+	.release = cgroup_seqfile_release,
+};
+
+static int cgroup_file_open(struct inode *inode, struct file *file)
+{
+	int err;
+	struct cftype *cft;
+
+	err = generic_file_open(inode, file);
+	if (err)
+		return err;
+	cft = __d_cft(file->f_dentry);
+
+	if (cft->read_map || cft->read_seq_string) {
+		struct cgroup_seqfile_state *state;
+
+		state = kzalloc(sizeof(*state), GFP_USER);
+		if (!state)
+			return -ENOMEM;
+
+		state->cft = cft;
+		state->cgroup = __d_cgrp(file->f_dentry->d_parent);
+		file->f_op = &cgroup_seqfile_operations;
+		err = single_open(file, cgroup_seqfile_show, state);
+		if (err < 0)
+			kfree(state);
+	} else if (cft->open)
+		err = cft->open(inode, file);
+	else
+		err = 0;
+
+	return err;
+}
+
+static int cgroup_file_release(struct inode *inode, struct file *file)
+{
+	struct cftype *cft = __d_cft(file->f_dentry);
+	if (cft->release)
+		return cft->release(inode, file);
+	return 0;
+}
+
+/*
+ * cgroup_rename - Only allow simple rename of directories in place.
+ */
+static int cgroup_rename(struct inode *old_dir, struct dentry *old_dentry,
+			    struct inode *new_dir, struct dentry *new_dentry)
+{
+	int ret;
+	struct cgroup_name *name, *old_name;
 	struct cgroup *cgrp;
 
 	BUILD_BUG_ON(sizeof(cgrp->root->release_agent_path) < PATH_MAX);
@@ -4841,10 +5096,25 @@ static struct cgroup_pidlist *cgroup_pidlist_find_create(struct cgroup *cgrp,
 {
 	struct cgroup_pidlist *l;
 
-	lockdep_assert_held(&cgrp->pidlist_mutex);
-
-	l = cgroup_pidlist_find(cgrp, type);
-	if (l)
+	/*
+	 * We can't drop the pidlist_mutex before taking the l->mutex in case
+	 * the last ref-holder is trying to remove l from the list at the same
+	 * time. Holding the pidlist_mutex precludes somebody taking whichever
+	 * list we find out from under us - compare release_pid_array().
+	 */
+	mutex_lock(&cgrp->pidlist_mutex);
+	list_for_each_entry(l, &cgrp->pidlists, links) {
+		if (l->key.type == type && l->key.ns == ns) {
+			/* make sure l doesn't vanish out from under us */
+			down_write(&l->mutex);
+			mutex_unlock(&cgrp->pidlist_mutex);
+			return l;
+		}
+	}
+	/* entry not found; create a new one */
+	l = kzalloc(sizeof(struct cgroup_pidlist), GFP_KERNEL);
+	if (!l) {
+		mutex_unlock(&cgrp->pidlist_mutex);
 		return l;
 
 	/* entry not found; create a new one */
@@ -4854,8 +5124,7 @@ static struct cgroup_pidlist *cgroup_pidlist_find_create(struct cgroup *cgrp,
 
 	INIT_DELAYED_WORK(&l->destroy_dwork, cgroup_pidlist_destroy_work_fn);
 	l->key.type = type;
-	/* don't need task_nsproxy() if we're looking at ourself */
-	l->key.ns = get_pid_ns(task_active_pid_ns(current));
+	l->key.ns = get_pid_ns(ns);
 	l->owner = cgrp;
 	list_add(&l->links, &cgrp->pidlists);
 	return l;
