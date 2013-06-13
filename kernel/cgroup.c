@@ -323,20 +323,24 @@ static void cgroup_release_agent(struct work_struct *work);
 static DECLARE_WORK(release_agent_work, cgroup_release_agent);
 static void check_for_release(struct cgroup *cgrp);
 
-/* Link structure for associating css_set objects with cgroups */
-struct cg_cgroup_link {
-	/*
-	 * List running through cg_cgroup_links associated with a
-	 * cgroup, anchored on cgroup->css_sets
-	 */
-	struct list_head cgrp_link_list;
-	struct cgroup *cgrp;
-	/*
-	 * List running through cg_cgroup_links pointing at a
-	 * single css_set object, anchored on css_set->cg_links
-	 */
-	struct list_head cg_link_list;
-	struct css_set *cg;
+/*
+ * A cgroup can be associated with multiple css_sets as different tasks may
+ * belong to different cgroups on different hierarchies.  In the other
+ * direction, a css_set is naturally associated with multiple cgroups.
+ * This M:N relationship is represented by the following link structure
+ * which exists for each association and allows traversing the associations
+ * from both sides.
+ */
+struct cgrp_cset_link {
+	/* the cgroup and css_set this link associates */
+	struct cgroup		*cgrp;
+	struct css_set		*cset;
+
+	/* list of cgrp_cset_links anchored at cgrp->cset_links */
+	struct list_head	cset_link;
+
+	/* list of cgrp_cset_links anchored at css_set->cgrp_links */
+	struct list_head	cgrp_link;
 };
 
 /* The default css_set - used by init and its children prior to any
@@ -347,7 +351,7 @@ struct cg_cgroup_link {
  */
 
 static struct css_set init_css_set;
-static struct cg_cgroup_link init_css_set_link;
+static struct cgrp_cset_link init_cgrp_cset_link;
 
 static int cgroup_init_idr(struct cgroup_subsys *ss,
 			   struct cgroup_subsys_state *css);
@@ -386,8 +390,7 @@ static int use_task_css_set_links __read_mostly;
 
 static void __put_css_set(struct css_set *cset, int taskexit)
 {
-	struct cg_cgroup_link *link;
-	struct cg_cgroup_link *saved_link;
+	struct cgrp_cset_link *link, *tmp_link;
 
 	/*
 	 * Ensure that the refcount doesn't hit zero while any readers
@@ -406,12 +409,11 @@ static void __put_css_set(struct css_set *cset, int taskexit)
 	hash_del(&cset->hlist);
 	css_set_count--;
 
-	list_for_each_entry_safe(link, saved_link, &cset->cg_links,
-				 cg_link_list) {
+	list_for_each_entry_safe(link, tmp_link, &cset->cgrp_links, cgrp_link) {
 		struct cgroup *cgrp = link->cgrp;
 
-		list_del(&link->cg_link_list);
-		list_del(&link->cgrp_link_list);
+		list_del(&link->cset_link);
+		list_del(&link->cgrp_link);
 
 		/*
 		 * We may not be holding cgroup_mutex, and if cgrp->count is
@@ -483,26 +485,26 @@ static bool compare_css_sets(struct css_set *cset,
 	 * candidates.
 	 */
 
-	l1 = &cset->cg_links;
-	l2 = &old_cset->cg_links;
+	l1 = &cset->cgrp_links;
+	l2 = &old_cset->cgrp_links;
 	while (1) {
-		struct cg_cgroup_link *cgl1, *cgl2;
+		struct cgrp_cset_link *link1, *link2;
 		struct cgroup *cgrp1, *cgrp2;
 
 		l1 = l1->next;
 		l2 = l2->next;
 		/* See if we reached the end - both lists are equal length. */
-		if (l1 == &cset->cg_links) {
-			BUG_ON(l2 != &old_cset->cg_links);
+		if (l1 == &cset->cgrp_links) {
+			BUG_ON(l2 != &old_cset->cgrp_links);
 			break;
 		} else {
-			BUG_ON(l2 == &old_cset->cg_links);
+			BUG_ON(l2 == &old_cset->cgrp_links);
 		}
 		/* Locate the cgroups associated with these links. */
-		cgl1 = list_entry(l1, struct cg_cgroup_link, cg_link_list);
-		cgl2 = list_entry(l2, struct cg_cgroup_link, cg_link_list);
-		cgrp1 = cgl1->cgrp;
-		cgrp2 = cgl2->cgrp;
+		link1 = list_entry(l1, struct cgrp_cset_link, cgrp_link);
+		link2 = list_entry(l2, struct cgrp_cset_link, cgrp_link);
+		cgrp1 = link1->cgrp;
+		cgrp2 = link2->cgrp;
 		/* Hierarchies should be linked in the same order. */
 		BUG_ON(cgrp1->root != cgrp2->root);
 
@@ -577,61 +579,64 @@ static struct css_set *find_existing_css_set(struct css_set *old_cset,
 	return NULL;
 }
 
-static void free_cg_links(struct list_head *tmp)
+static void free_cgrp_cset_links(struct list_head *links_to_free)
 {
-	struct cg_cgroup_link *link;
-	struct cg_cgroup_link *saved_link;
+	struct cgrp_cset_link *link, *tmp_link;
 
-	list_for_each_entry_safe(link, saved_link, tmp, cgrp_link_list) {
-		list_del(&link->cgrp_link_list);
+	list_for_each_entry_safe(link, tmp_link, links_to_free, cset_link) {
+		list_del(&link->cset_link);
 		kfree(link);
 	}
 }
 
-/*
- * allocate_cg_links() allocates "count" cg_cgroup_link structures
- * and chains them on tmp through their cgrp_link_list fields. Returns 0 on
- * success or a negative error
+/**
+ * allocate_cgrp_cset_links - allocate cgrp_cset_links
+ * @count: the number of links to allocate
+ * @tmp_links: list_head the allocated links are put on
+ *
+ * Allocate @count cgrp_cset_link structures and chain them on @tmp_links
+ * through ->cset_link.  Returns 0 on success or -errno.
  */
-static int allocate_cg_links(int count, struct list_head *tmp)
+static int allocate_cgrp_cset_links(int count, struct list_head *tmp_links)
 {
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 	int i;
-	INIT_LIST_HEAD(tmp);
+
+	INIT_LIST_HEAD(tmp_links);
+
 	for (i = 0; i < count; i++) {
 		link = kmalloc(sizeof(*link), GFP_KERNEL);
 		if (!link) {
-			free_cg_links(tmp);
+			free_cgrp_cset_links(tmp_links);
 			return -ENOMEM;
 		}
-		list_add(&link->cgrp_link_list, tmp);
+		list_add(&link->cset_link, tmp_links);
 	}
 	return 0;
 }
 
 /**
  * link_css_set - a helper function to link a css_set to a cgroup
- * @tmp_cg_links: cg_cgroup_link objects allocated by allocate_cg_links()
+ * @tmp_links: cgrp_cset_link objects allocated by allocate_cgrp_cset_links()
  * @cset: the css_set to be linked
  * @cgrp: the destination cgroup
  */
-static void link_css_set(struct list_head *tmp_cg_links,
-			 struct css_set *cset, struct cgroup *cgrp)
+static void link_css_set(struct list_head *tmp_links, struct css_set *cset,
+			 struct cgroup *cgrp)
 {
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 
-	BUG_ON(list_empty(tmp_cg_links));
-	link = list_first_entry(tmp_cg_links, struct cg_cgroup_link,
-				cgrp_link_list);
-	link->cg = cset;
+	BUG_ON(list_empty(tmp_links));
+	link = list_first_entry(tmp_links, struct cgrp_cset_link, cset_link);
+	link->cset = cset;
 	link->cgrp = cgrp;
 	atomic_inc(&cgrp->count);
-	list_move(&link->cgrp_link_list, &cgrp->css_sets);
+	list_move(&link->cset_link, &cgrp->cset_links);
 	/*
 	 * Always add links to the tail of the list so that the list
 	 * is sorted by order of hierarchy creation
 	 */
-	list_add_tail(&link->cg_link_list, &cset->cg_links);
+	list_add_tail(&link->cgrp_link, &cset->cgrp_links);
 }
 
 /*
@@ -646,10 +651,8 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 {
 	struct css_set *cset;
 	struct cgroup_subsys_state *template[CGROUP_SUBSYS_COUNT];
-
-	struct list_head tmp_cg_links;
-
-	struct cg_cgroup_link *link;
+	struct list_head tmp_links;
+	struct cgrp_cset_link *link;
 	unsigned long key;
 
 	/* First see if we already have a cgroup group that matches
@@ -667,14 +670,14 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 	if (!cset)
 		return NULL;
 
-	/* Allocate all the cg_cgroup_link objects that we'll need */
-	if (allocate_cg_links(root_count, &tmp_cg_links) < 0) {
+	/* Allocate all the cgrp_cset_link objects that we'll need */
+	if (allocate_cgrp_cset_links(root_count, &tmp_links) < 0) {
 		kfree(cset);
 		return NULL;
 	}
 
 	atomic_set(&cset->refcount, 1);
-	INIT_LIST_HEAD(&cset->cg_links);
+	INIT_LIST_HEAD(&cset->cgrp_links);
 	INIT_LIST_HEAD(&cset->tasks);
 	INIT_HLIST_NODE(&cset->hlist);
 
@@ -684,14 +687,15 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 
 	write_lock(&css_set_lock);
 	/* Add reference counts and links from the new css_set. */
-	list_for_each_entry(link, &old_cset->cg_links, cg_link_list) {
+	list_for_each_entry(link, &old_cset->cgrp_links, cgrp_link) {
 		struct cgroup *c = link->cgrp;
+
 		if (c->root == cgrp->root)
 			c = cgrp;
-		link_css_set(&tmp_cg_links, cset, c);
+		link_css_set(&tmp_links, cset, c);
 	}
 
-	BUG_ON(!list_empty(&tmp_cg_links));
+	BUG_ON(!list_empty(&tmp_links));
 
 	css_set_count++;
 
@@ -725,9 +729,11 @@ static struct cgroup *task_cgroup_from_root(struct task_struct *task,
 	if (cset == &init_css_set) {
 		res = &root->top_cgroup;
 	} else {
-		struct cg_cgroup_link *link;
-		list_for_each_entry(link, &cset->cg_links, cg_link_list) {
+		struct cgrp_cset_link *link;
+
+		list_for_each_entry(link, &cset->cgrp_links, cgrp_link) {
 			struct cgroup *c = link->cgrp;
+
 			if (c->root == root) {
 				res = c;
 				break;
@@ -1413,7 +1419,7 @@ static void init_cgroup_housekeeping(struct cgroup *cgrp)
 	INIT_LIST_HEAD(&cgrp->sibling);
 	INIT_LIST_HEAD(&cgrp->children);
 	INIT_LIST_HEAD(&cgrp->files);
-	INIT_LIST_HEAD(&cgrp->css_sets);
+	INIT_LIST_HEAD(&cgrp->cset_links);
 	INIT_LIST_HEAD(&cgrp->allcg_node);
 	INIT_LIST_HEAD(&cgrp->release_list);
 	INIT_LIST_HEAD(&cgrp->pidlists);
@@ -1612,7 +1618,7 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 	BUG_ON(!root);
 	if (root == opts.new_root) {
 		/* We used the new root structure, so this is a new hierarchy */
-		struct list_head tmp_cg_links;
+		struct list_head tmp_links;
 		struct cgroup *root_cgrp = &root->top_cgroup;
 		struct cgroupfs_root *existing_root;
 		const struct cred *cred;
@@ -1644,7 +1650,7 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		 * that's us. The worst that can happen is that we
 		 * have some link structures left over
 		 */
-		ret = allocate_cg_links(css_set_count, &tmp_cg_links);
+		ret = allocate_cgrp_cset_links(css_set_count, &tmp_links);
 		if (ret)
 			goto unlock_drop;
 
@@ -1654,7 +1660,7 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 
 		ret = rebind_subsystems(root, root->subsys_mask);
 		if (ret == -EBUSY) {
-			free_cg_links(&tmp_cg_links);
+			free_cgrp_cset_links(&tmp_links);
 			goto unlock_drop;
 		}
 		/*
@@ -1676,10 +1682,10 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		 * the css_set objects */
 		write_lock(&css_set_lock);
 		hash_for_each(css_set_table, i, cset, hlist)
-			link_css_set(&tmp_cg_links, cset, root_cgrp);
+			link_css_set(&tmp_links, cset, root_cgrp);
 		write_unlock(&css_set_lock);
 
-		free_cg_links(&tmp_cg_links);
+		free_cgrp_cset_links(&tmp_links);
 
 		BUG_ON(!list_empty(&root_cgrp->children));
 		BUG_ON(root->number_of_cgroups != 1);
@@ -1733,9 +1739,8 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 static void cgroup_kill_sb(struct super_block *sb) {
 	struct cgroupfs_root *root = sb->s_fs_info;
 	struct cgroup *cgrp = &root->top_cgroup;
+	struct cgrp_cset_link *link, *tmp_link;
 	int ret;
-	struct cg_cgroup_link *link;
-	struct cg_cgroup_link *saved_link;
 
 	BUG_ON(!root);
 
@@ -1751,15 +1756,14 @@ static void cgroup_kill_sb(struct super_block *sb) {
 	BUG_ON(ret);
 
 	/*
-	 * Release all the links from css_sets to this hierarchy's
+	 * Release all the links from cset_links to this hierarchy's
 	 * root cgroup
 	 */
 	write_lock(&css_set_lock);
 
-	list_for_each_entry_safe(link, saved_link, &cgrp->css_sets,
-				 cgrp_link_list) {
-		list_del(&link->cg_link_list);
-		list_del(&link->cgrp_link_list);
+	list_for_each_entry_safe(link, tmp_link, &cgrp->cset_links, cset_link) {
+		list_del(&link->cset_link);
+		list_del(&link->cgrp_link);
 		kfree(link);
 	}
 	write_unlock(&css_set_lock);
@@ -2972,12 +2976,11 @@ int cgroup_rm_cftypes(struct cgroup_subsys *ss, struct cftype *cfts)
 int cgroup_task_count(const struct cgroup *cgrp)
 {
 	int count = 0;
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 
 	read_lock(&css_set_lock);
-	list_for_each_entry(link, &cgrp->css_sets, cgrp_link_list) {
-		count += atomic_read(&link->cg->refcount);
-	}
+	list_for_each_entry(link, &cgrp->cset_links, cset_link)
+		count += atomic_read(&link->cset->refcount);
 	read_unlock(&css_set_lock);
 	return count;
 }
@@ -2986,24 +2989,23 @@ int cgroup_task_count(const struct cgroup *cgrp)
  * Advance a list_head iterator.  The iterator should be positioned at
  * the start of a css_set
  */
-static void cgroup_advance_iter(struct cgroup *cgrp,
-				struct cgroup_iter *it)
+static void cgroup_advance_iter(struct cgroup *cgrp, struct cgroup_iter *it)
 {
-	struct list_head *l = it->cg_link;
-	struct cg_cgroup_link *link;
+	struct list_head *l = it->cset_link;
+	struct cgrp_cset_link *link;
 	struct css_set *cset;
 
 	/* Advance to the next non-empty css_set */
 	do {
 		l = l->next;
-		if (l == &cgrp->css_sets) {
-			it->cg_link = NULL;
+		if (l == &cgrp->cset_links) {
+			it->cset_link = NULL;
 			return;
 		}
-		link = list_entry(l, struct cg_cgroup_link, cgrp_link_list);
-		cset = link->cg;
+		link = list_entry(l, struct cgrp_cset_link, cset_link);
+		cset = link->cset;
 	} while (list_empty(&cset->tasks));
-	it->cg_link = l;
+	it->cset_link = l;
 	it->task = cset->tasks.next;
 }
 
@@ -3220,635 +3222,663 @@ void cgroup_iter_start(struct cgroup *cgrp, struct cgroup_iter *it)
 	 * we need to enable the list linking each css_set to its
 	 * tasks, and fix up all existing tasks.
 	 */
-	 struct { enum cgroup_filetype type; struct pid_namespace *ns; } key;
-	 /* array of xids */
-	 pid_t *list;
-	 /* how many elements the above list has */
-	 int length;
-	 /* how many files are using the current array */
-	 int use_count;
-	 /* each of these stored in a list by its cgroup */
-	 struct list_head links;
-	 /* pointer to the cgroup we belong to, for list removal purposes */
-	 struct cgroup *owner;
-	 /* protects the other fields */
-	 struct rw_semaphore mutex;
- };
- 
- /*
-  * The following two functions "fix" the issue where there are more pids
-  * than kmalloc will give memory for; in such cases, we use vmalloc/vfree.
-  * TODO: replace with a kernel-wide solution to this problem
-  */
- #define PIDLIST_TOO_LARGE(c) ((c) * sizeof(pid_t) > (PAGE_SIZE * 2))
- static void *pidlist_allocate(int count)
- {
-	 if (PIDLIST_TOO_LARGE(count))
-		 return vmalloc(count * sizeof(pid_t));
-	 else
-		 return kmalloc(count * sizeof(pid_t), GFP_KERNEL);
- }
- static void pidlist_free(void *p)
- {
-	 if (is_vmalloc_addr(p))
-		 vfree(p);
-	 else
-		 kfree(p);
- }
- 
- /*
-  * pidlist_uniq - given a kmalloc()ed list, strip out all duplicate entries
-  * Returns the number of unique elements.
-  */
- static int pidlist_uniq(pid_t *list, int length)
- {
-	 int src, dest = 1;
- 
-	 /*
-	  * we presume the 0th element is unique, so i starts at 1. trivial
-	  * edge cases first; no work needs to be done for either
-	  */
-	 if (length == 0 || length == 1)
-		 return length;
-	 /* src and dest walk down the list; dest counts unique elements */
-	 for (src = 1; src < length; src++) {
-		 /* find next unique element */
-		 while (list[src] == list[src-1]) {
-			 src++;
-			 if (src == length)
-				 goto after;
-		 }
-		 /* dest always points to where the next unique element goes */
-		 list[dest] = list[src];
-		 dest++;
-	 }
- after:
-	 return dest;
- }
- 
- static int cmppid(const void *a, const void *b)
- {
-	 return *(pid_t *)a - *(pid_t *)b;
- }
- 
- /*
-  * find the appropriate pidlist for our purpose (given procs vs tasks)
-  * returns with the lock on that pidlist already held, and takes care
-  * of the use count, or returns NULL with no locks held if we're out of
-  * memory.
-  */
- static struct cgroup_pidlist *cgroup_pidlist_find(struct cgroup *cgrp,
-						   enum cgroup_filetype type)
- {
-	 struct cgroup_pidlist *l;
-	 /* don't need task_nsproxy() if we're looking at ourself */
-	 struct pid_namespace *ns = task_active_pid_ns(current);
- 
-	 /*
-	  * We can't drop the pidlist_mutex before taking the l->mutex in case
-	  * the last ref-holder is trying to remove l from the list at the same
-	  * time. Holding the pidlist_mutex precludes somebody taking whichever
-	  * list we find out from under us - compare release_pid_array().
-	  */
-	 mutex_lock(&cgrp->pidlist_mutex);
-	 list_for_each_entry(l, &cgrp->pidlists, links) {
-		 if (l->key.type == type && l->key.ns == ns) {
-			 /* make sure l doesn't vanish out from under us */
-			 down_write(&l->mutex);
-			 mutex_unlock(&cgrp->pidlist_mutex);
-			 return l;
-		 }
-	 }
-	 /* entry not found; create a new one */
-	 l = kmalloc(sizeof(struct cgroup_pidlist), GFP_KERNEL);
-	 if (!l) {
-		 mutex_unlock(&cgrp->pidlist_mutex);
-		 return l;
-	 }
-	 init_rwsem(&l->mutex);
-	 down_write(&l->mutex);
-	 l->key.type = type;
-	 l->key.ns = get_pid_ns(ns);
-	 l->use_count = 0; /* don't increment here */
-	 l->list = NULL;
-	 l->owner = cgrp;
-	 list_add(&l->links, &cgrp->pidlists);
-	 mutex_unlock(&cgrp->pidlist_mutex);
-	 return l;
- }
- 
- /*
-  * Load a cgroup's pidarray with either procs' tgids or tasks' pids
-  */
- static int pidlist_array_load(struct cgroup *cgrp, enum cgroup_filetype type,
-				   struct cgroup_pidlist **lp)
- {
-	 pid_t *array;
-	 int length;
-	 int pid, n = 0; /* used for populating the array */
-	 struct cgroup_iter it;
-	 struct task_struct *tsk;
-	 struct cgroup_pidlist *l;
- 
-	 /*
-	  * If cgroup gets more users after we read count, we won't have
-	  * enough space - tough.  This race is indistinguishable to the
-	  * caller from the case that the additional cgroup users didn't
-	  * show up until sometime later on.
-	  */
-	 length = cgroup_task_count(cgrp);
-	 array = pidlist_allocate(length);
-	 if (!array)
-		 return -ENOMEM;
-	 /* now, populate the array */
-	 cgroup_iter_start(cgrp, &it);
-	 while ((tsk = cgroup_iter_next(cgrp, &it))) {
-		 if (unlikely(n == length))
-			 break;
-		 /* get tgid or pid for procs or tasks file respectively */
-		 if (type == CGROUP_FILE_PROCS)
-			 pid = task_tgid_vnr(tsk);
-		 else
-			 pid = task_pid_vnr(tsk);
-		 if (pid > 0) /* make sure to only use valid results */
-			 array[n++] = pid;
-	 }
-	 cgroup_iter_end(cgrp, &it);
-	 length = n;
-	 /* now sort & (if procs) strip out duplicates */
-	 sort(array, length, sizeof(pid_t), cmppid, NULL);
-	 if (type == CGROUP_FILE_PROCS)
-		 length = pidlist_uniq(array, length);
-	 l = cgroup_pidlist_find(cgrp, type);
-	 if (!l) {
-		 pidlist_free(array);
-		 return -ENOMEM;
-	 }
-	 /* store array, freeing old if necessary - lock already held */
-	 pidlist_free(l->list);
-	 l->list = array;
-	 l->length = length;
-	 l->use_count++;
-	 up_write(&l->mutex);
-	 *lp = l;
-	 return 0;
- }
- 
- /**
-  * cgroupstats_build - build and fill cgroupstats
-  * @stats: cgroupstats to fill information into
-  * @dentry: A dentry entry belonging to the cgroup for which stats have
-  * been requested.
-  *
-  * Build and fill cgroupstats so that taskstats can export it to user
-  * space.
-  */
- int cgroupstats_build(struct cgroupstats *stats, struct dentry *dentry)
- {
-	 int ret = -EINVAL;
-	 struct cgroup *cgrp;
-	 struct cgroup_iter it;
-	 struct task_struct *tsk;
- 
-	 /*
-	  * Validate dentry by checking the superblock operations,
-	  * and make sure it's a directory.
-	  */
-	 if (dentry->d_sb->s_op != &cgroup_ops ||
-		 !S_ISDIR(dentry->d_inode->i_mode))
-		  goto err;
- 
-	 ret = 0;
-	 cgrp = dentry->d_fsdata;
- 
-	 cgroup_iter_start(cgrp, &it);
-	 while ((tsk = cgroup_iter_next(cgrp, &it))) {
-		 switch (tsk->state) {
-		 case TASK_RUNNING:
-			 stats->nr_running++;
-			 break;
-		 case TASK_INTERRUPTIBLE:
-			 stats->nr_sleeping++;
-			 break;
-		 case TASK_UNINTERRUPTIBLE:
-			 stats->nr_uninterruptible++;
-			 break;
-		 case TASK_STOPPED:
-			 stats->nr_stopped++;
-			 break;
-		 default:
-			 if (delayacct_is_task_waiting_on_io(tsk))
-				 stats->nr_io_wait++;
-			 break;
-		 }
-	 }
-	 cgroup_iter_end(cgrp, &it);
- 
- err:
-	 return ret;
- }
- 
- 
- /*
-  * seq_file methods for the tasks/procs files. The seq_file position is the
-  * next pid to display; the seq_file iterator is a pointer to the pid
-  * in the cgroup->l->list array.
-  */
- 
- static void *cgroup_pidlist_start(struct seq_file *s, loff_t *pos)
- {
-	 /*
-	  * Initially we receive a position value that corresponds to
-	  * one more than the last pid shown (or 0 on the first call or
-	  * after a seek to the start). Use a binary-search to find the
-	  * next pid to display, if any
-	  */
-	 struct cgroup_pidlist *l = s->private;
-	 int index = 0, pid = *pos;
-	 int *iter;
- 
-	 down_read(&l->mutex);
-	 if (pid) {
-		 int end = l->length;
- 
-		 while (index < end) {
-			 int mid = (index + end) / 2;
-			 if (l->list[mid] == pid) {
-				 index = mid;
-				 break;
-			 } else if (l->list[mid] <= pid)
-				 index = mid + 1;
-			 else
-				 end = mid;
-		 }
-	 }
-	 /* If we're off the end of the array, we're done */
-	 if (index >= l->length)
-		 return NULL;
-	 /* Update the abstract position to be the actual pid that we found */
-	 iter = l->list + index;
-	 *pos = *iter;
-	 return iter;
- }
- 
- static void cgroup_pidlist_stop(struct seq_file *s, void *v)
- {
-	 struct cgroup_pidlist *l = s->private;
-	 up_read(&l->mutex);
- }
- 
- static void *cgroup_pidlist_next(struct seq_file *s, void *v, loff_t *pos)
- {
-	 struct cgroup_pidlist *l = s->private;
-	 pid_t *p = v;
-	 pid_t *end = l->list + l->length;
-	 /*
-	  * Advance to the next pid in the array. If this goes off the
-	  * end, we're done
-	  */
-	 p++;
-	 if (p >= end) {
-		 return NULL;
-	 } else {
-		 *pos = *p;
-		 return p;
-	 }
- }
- 
- static int cgroup_pidlist_show(struct seq_file *s, void *v)
- {
-	 return seq_printf(s, "%d\n", *(int *)v);
- }
- 
- /*
-  * seq_operations functions for iterating on pidlists through seq_file -
-  * independent of whether it's tasks or procs
-  */
- static const struct seq_operations cgroup_pidlist_seq_operations = {
-	 .start = cgroup_pidlist_start,
-	 .stop = cgroup_pidlist_stop,
-	 .next = cgroup_pidlist_next,
-	 .show = cgroup_pidlist_show,
- };
- 
- static void cgroup_release_pid_array(struct cgroup_pidlist *l)
- {
-	 /*
-	  * the case where we're the last user of this particular pidlist will
-	  * have us remove it from the cgroup's list, which entails taking the
-	  * mutex. since in pidlist_find the pidlist->lock depends on cgroup->
-	  * pidlist_mutex, we have to take pidlist_mutex first.
-	  */
-	 mutex_lock(&l->owner->pidlist_mutex);
-	 down_write(&l->mutex);
-	 BUG_ON(!l->use_count);
-	 if (!--l->use_count) {
-		 /* we're the last user if refcount is 0; remove and free */
-		 list_del(&l->links);
-		 mutex_unlock(&l->owner->pidlist_mutex);
-		 pidlist_free(l->list);
-		 put_pid_ns(l->key.ns);
-		 up_write(&l->mutex);
-		 kfree(l);
-		 return;
-	 }
-	 mutex_unlock(&l->owner->pidlist_mutex);
-	 up_write(&l->mutex);
- }
- 
- static int cgroup_pidlist_release(struct inode *inode, struct file *file)
- {
-	 struct cgroup_pidlist *l;
-	 if (!(file->f_mode & FMODE_READ))
-		 return 0;
-	 /*
-	  * the seq_file will only be initialized if the file was opened for
-	  * reading; hence we check if it's not null only in that case.
-	  */
-	 l = ((struct seq_file *)file->private_data)->private;
-	 cgroup_release_pid_array(l);
-	 return seq_release(inode, file);
- }
- 
- static const struct file_operations cgroup_pidlist_operations = {
-	 .read = seq_read,
-	 .llseek = seq_lseek,
-	 .write = cgroup_file_write,
-	 .release = cgroup_pidlist_release,
- };
- 
- /*
-  * The following functions handle opens on a file that displays a pidlist
-  * (tasks or procs). Prepare an array of the process/thread IDs of whoever's
-  * in the cgroup.
-  */
- /* helper function for the two below it */
- static int cgroup_pidlist_open(struct file *file, enum cgroup_filetype type)
- {
-	 struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
-	 struct cgroup_pidlist *l;
-	 int retval;
- 
-	 /* Nothing to do for write-only files */
-	 if (!(file->f_mode & FMODE_READ))
-		 return 0;
- 
-	 /* have the array populated */
-	 retval = pidlist_array_load(cgrp, type, &l);
-	 if (retval)
-		 return retval;
-	 /* configure file information */
-	 file->f_op = &cgroup_pidlist_operations;
- 
-	 retval = seq_open(file, &cgroup_pidlist_seq_operations);
-	 if (retval) {
-		 cgroup_release_pid_array(l);
-		 return retval;
-	 }
-	 ((struct seq_file *)file->private_data)->private = l;
-	 return 0;
- }
- static int cgroup_tasks_open(struct inode *unused, struct file *file)
- {
-	 return cgroup_pidlist_open(file, CGROUP_FILE_TASKS);
- }
- static int cgroup_procs_open(struct inode *unused, struct file *file)
- {
-	 return cgroup_pidlist_open(file, CGROUP_FILE_PROCS);
- }
- 
- static u64 cgroup_read_notify_on_release(struct cgroup *cgrp,
-						 struct cftype *cft)
- {
-	 return notify_on_release(cgrp);
- }
- 
- static int cgroup_write_notify_on_release(struct cgroup *cgrp,
-					   struct cftype *cft,
-					   u64 val)
- {
-	 clear_bit(CGRP_RELEASABLE, &cgrp->flags);
-	 if (val)
-		 set_bit(CGRP_NOTIFY_ON_RELEASE, &cgrp->flags);
-	 else
-		 clear_bit(CGRP_NOTIFY_ON_RELEASE, &cgrp->flags);
-	 return 0;
- }
- 
- /*
-  * When dput() is called asynchronously, if umount has been done and
-  * then deactivate_super() in cgroup_free_fn() kills the superblock,
-  * there's a small window that vfs will see the root dentry with non-zero
-  * refcnt and trigger BUG().
-  *
-  * That's why we hold a reference before dput() and drop it right after.
-  */
- static void cgroup_dput(struct cgroup *cgrp)
- {
-	 struct super_block *sb = cgrp->root->sb;
- 
-	 atomic_inc(&sb->s_active);
-	 dput(cgrp->dentry);
-	 deactivate_super(sb);
- }
- 
- /*
-  * Unregister event and free resources.
-  *
-  * Gets called from workqueue.
-  */
- static void cgroup_event_remove(struct work_struct *work)
- {
-	 struct cgroup_event *event = container_of(work, struct cgroup_event,
-			 remove);
-	 struct cgroup *cgrp = event->cgrp;
- 
-	 remove_wait_queue(event->wqh, &event->wait);
- 
-	 event->cft->unregister_event(cgrp, event->cft, event->eventfd);
- 
-	 /* Notify userspace the event is going away. */
-	 eventfd_signal(event->eventfd, 1);
- 
-	 eventfd_ctx_put(event->eventfd);
-	 kfree(event);
-	 cgroup_dput(cgrp);
- }
- 
- /*
-  * Gets called on POLLHUP on eventfd when user closes it.
-  *
-  * Called with wqh->lock held and interrupts disabled.
-  */
- static int cgroup_event_wake(wait_queue_t *wait, unsigned mode,
-		 int sync, void *key)
- {
-	 struct cgroup_event *event = container_of(wait,
-			 struct cgroup_event, wait);
-	 struct cgroup *cgrp = event->cgrp;
-	 unsigned long flags = (unsigned long)key;
- 
-	 if (flags & POLLHUP) {
-		 /*
-		  * If the event has been detached at cgroup removal, we
-		  * can simply return knowing the other side will cleanup
-		  * for us.
-		  *
-		  * We can't race against event freeing since the other
-		  * side will require wqh->lock via remove_wait_queue(),
-		  * which we hold.
-		  */
-		 spin_lock(&cgrp->event_list_lock);
-		 if (!list_empty(&event->list)) {
-			 list_del_init(&event->list);
-			 /*
-			  * We are in atomic context, but cgroup_event_remove()
-			  * may sleep, so we have to call it in workqueue.
-			  */
-			 schedule_work(&event->remove);
-		 }
-		 spin_unlock(&cgrp->event_list_lock);
-	 }
- 
-	 return 0;
- }
- 
- static void cgroup_event_ptable_queue_proc(struct file *file,
-		 wait_queue_head_t *wqh, poll_table *pt)
- {
-	 struct cgroup_event *event = container_of(pt,
-			 struct cgroup_event, pt);
- 
-	 event->wqh = wqh;
-	 add_wait_queue(wqh, &event->wait);
- }
- 
- /*
-  * Parse input and register new cgroup event handler.
-  *
-  * Input must be in format '<event_fd> <control_fd> <args>'.
-  * Interpretation of args is defined by control file implementation.
-  */
- static int cgroup_write_event_control(struct cgroup *cgrp, struct cftype *cft,
-					   const char *buffer)
- {
-	 struct cgroup_event *event = NULL;
-	 struct cgroup *cgrp_cfile;
-	 unsigned int efd, cfd;
-	 struct file *efile = NULL;
-	 struct file *cfile = NULL;
-	 char *endp;
-	 int ret;
- 
-	 efd = simple_strtoul(buffer, &endp, 10);
-	 if (*endp != ' ')
-		 return -EINVAL;
-	 buffer = endp + 1;
- 
-	 cfd = simple_strtoul(buffer, &endp, 10);
-	 if ((*endp != ' ') && (*endp != '\0'))
-		 return -EINVAL;
-	 buffer = endp + 1;
- 
-	 event = kzalloc(sizeof(*event), GFP_KERNEL);
-	 if (!event)
-		 return -ENOMEM;
-	 event->cgrp = cgrp;
-	 INIT_LIST_HEAD(&event->list);
-	 init_poll_funcptr(&event->pt, cgroup_event_ptable_queue_proc);
-	 init_waitqueue_func_entry(&event->wait, cgroup_event_wake);
-	 INIT_WORK(&event->remove, cgroup_event_remove);
- 
-	 efile = eventfd_fget(efd);
-	 if (IS_ERR(efile)) {
-		 ret = PTR_ERR(efile);
-		 goto fail;
-	 }
- 
-	 event->eventfd = eventfd_ctx_fileget(efile);
-	 if (IS_ERR(event->eventfd)) {
-		 ret = PTR_ERR(event->eventfd);
-		 goto fail;
-	 }
- 
-	 cfile = fget(cfd);
-	 if (!cfile) {
-		 ret = -EBADF;
-		 goto fail;
-	 }
- 
-	 /* the process need read permission on control file */
-	 /* AV: shouldn't we check that it's been opened for read instead? */
-	 ret = inode_permission(file_inode(cfile), MAY_READ);
-	 if (ret < 0)
-		 goto fail;
- 
-	 event->cft = __file_cft(cfile);
-	 if (IS_ERR(event->cft)) {
-		 ret = PTR_ERR(event->cft);
-		 goto fail;
-	 }
- 
-	 /*
-	  * The file to be monitored must be in the same cgroup as
-	  * cgroup.event_control is.
-	  */
-	 cgrp_cfile = __d_cgrp(cfile->f_dentry->d_parent);
-	 if (cgrp_cfile != cgrp) {
-		 ret = -EINVAL;
-		 goto fail;
-	 }
- 
-	 if (!event->cft->register_event || !event->cft->unregister_event) {
-		 ret = -EINVAL;
-		 goto fail;
-	 }
- 
-	 ret = event->cft->register_event(cgrp, event->cft,
-			 event->eventfd, buffer);
-	 if (ret)
-		 goto fail;
- 
-	 efile->f_op->poll(efile, &event->pt);
- 
-	 /*
-	  * Events should be removed after rmdir of cgroup directory, but before
-	  * destroying subsystem state objects. Let's take reference to cgroup
-	  * directory dentry to do that.
-	  */
-	 dget(cgrp->dentry);
- 
-	 spin_lock(&cgrp->event_list_lock);
-	 list_add(&event->list, &cgrp->event_list);
-	 spin_unlock(&cgrp->event_list_lock);
- 
-	 fput(cfile);
-	 fput(efile);
- 
-	 return 0;
- 
- fail:
-	 if (cfile)
-		 fput(cfile);
- 
-	 if (event && event->eventfd && !IS_ERR(event->eventfd))
-		 eventfd_ctx_put(event->eventfd);
- 
-	 if (!IS_ERR_OR_NULL(efile))
-		 fput(efile);
- 
-	 kfree(event);
- 
-	 return ret;
- }
- 
- static u64 cgroup_clone_children_read(struct cgroup *cgrp,
-					 struct cftype *cft)
- {
-	 return test_bit(CGRP_CPUSET_CLONE_CHILDREN, &cgrp->flags);
- }
- 
- static int cgroup_clone_children_write(struct cgroup *cgrp,
+	if (!use_task_css_set_links)
+		cgroup_enable_task_cg_lists();
+
+	read_lock(&css_set_lock);
+	it->cset_link = &cgrp->cset_links;
+	cgroup_advance_iter(cgrp, it);
+}
+
+struct task_struct *cgroup_iter_next(struct cgroup *cgrp,
+					struct cgroup_iter *it)
+{
+	struct task_struct *res;
+	struct list_head *l = it->task;
+	struct cgrp_cset_link *link;
+
+	/* If the iterator cg is NULL, we have no tasks */
+	if (!it->cset_link)
+		return NULL;
+	res = list_entry(l, struct task_struct, cg_list);
+	/* Advance iterator to find next entry */
+	l = l->next;
+	link = list_entry(it->cset_link, struct cgrp_cset_link, cset_link);
+	if (l == &link->cset->tasks) {
+		/* We reached the end of this task list - move on to
+		 * the next cg_cgroup_link */
+		cgroup_advance_iter(cgrp, it);
+	} else {
+		it->task = l;
+	}
+	return res;
+}
+
+void cgroup_iter_end(struct cgroup *cgrp, struct cgroup_iter *it)
+	__releases(css_set_lock)
+{
+	read_unlock(&css_set_lock);
+}
+
+static inline int started_after_time(struct task_struct *t1,
+				     struct timespec *time,
+				     struct task_struct *t2)
+{
+	int start_diff = timespec_compare(&t1->start_time, time);
+	if (start_diff > 0) {
+		return 1;
+	} else if (start_diff < 0) {
+		return 0;
+	} else {
+		/*
+		 * Arbitrarily, if two processes started at the same
+		 * time, we'll say that the lower pointer value
+		 * started first. Note that t2 may have exited by now
+		 * so this may not be a valid pointer any longer, but
+		 * that's fine - it still serves to distinguish
+		 * between two tasks started (effectively) simultaneously.
+		 */
+		return t1 > t2;
+	}
+}
+
+/*
+ * This function is a callback from heap_insert() and is used to order
+ * the heap.
+ * In this case we order the heap in descending task start time.
+ */
+static inline int started_after(void *p1, void *p2)
+{
+	struct task_struct *t1 = p1;
+	struct task_struct *t2 = p2;
+	return started_after_time(t1, &t2->start_time, t2);
+}
+
+/**
+ * cgroup_scan_tasks - iterate though all the tasks in a cgroup
+ * @scan: struct cgroup_scanner containing arguments for the scan
+ *
+ * Arguments include pointers to callback functions test_task() and
+ * process_task().
+ * Iterate through all the tasks in a cgroup, calling test_task() for each,
+ * and if it returns true, call process_task() for it also.
+ * The test_task pointer may be NULL, meaning always true (select all tasks).
+ * Effectively duplicates cgroup_iter_{start,next,end}()
+ * but does not lock css_set_lock for the call to process_task().
+ * The struct cgroup_scanner may be embedded in any structure of the caller's
+ * creation.
+ * It is guaranteed that process_task() will act on every task that
+ * is a member of the cgroup for the duration of this call. This
+ * function may or may not call process_task() for tasks that exit
+ * or move to a different cgroup during the call, or are forked or
+ * move into the cgroup during the call.
+ *
+ * Note that test_task() may be called with locks held, and may in some
+ * situations be called multiple times for the same task, so it should
+ * be cheap.
+ * If the heap pointer in the struct cgroup_scanner is non-NULL, a heap has been
+ * pre-allocated and will be used for heap operations (and its "gt" member will
+ * be overwritten), else a temporary heap will be used (allocation of which
+ * may cause this function to fail).
+ */
+int cgroup_scan_tasks(struct cgroup_scanner *scan)
+{
+	int retval, i;
+	struct cgroup_iter it;
+	struct task_struct *p, *dropped;
+	/* Never dereference latest_task, since it's not refcounted */
+	struct task_struct *latest_task = NULL;
+	struct ptr_heap tmp_heap;
+	struct ptr_heap *heap;
+	struct timespec latest_time = { 0, 0 };
+
+	if (scan->heap) {
+		/* The caller supplied our heap and pre-allocated its memory */
+		heap = scan->heap;
+		heap->gt = &started_after;
+	} else {
+		/* We need to allocate our own heap memory */
+		heap = &tmp_heap;
+		retval = heap_init(heap, PAGE_SIZE, GFP_KERNEL, &started_after);
+		if (retval)
+			/* cannot allocate the heap */
+			return retval;
+	}
+
+ again:
+	/*
+	 * Scan tasks in the cgroup, using the scanner's "test_task" callback
+	 * to determine which are of interest, and using the scanner's
+	 * "process_task" callback to process any of them that need an update.
+	 * Since we don't want to hold any locks during the task updates,
+	 * gather tasks to be processed in a heap structure.
+	 * The heap is sorted by descending task start time.
+	 * If the statically-sized heap fills up, we overflow tasks that
+	 * started later, and in future iterations only consider tasks that
+	 * started after the latest task in the previous pass. This
+	 * guarantees forward progress and that we don't miss any tasks.
+	 */
+	heap->size = 0;
+	cgroup_iter_start(scan->cg, &it);
+	while ((p = cgroup_iter_next(scan->cg, &it))) {
+		/*
+		 * Only affect tasks that qualify per the caller's callback,
+		 * if he provided one
+		 */
+		if (scan->test_task && !scan->test_task(p, scan))
+			continue;
+		/*
+		 * Only process tasks that started after the last task
+		 * we processed
+		 */
+		if (!started_after_time(p, &latest_time, latest_task))
+			continue;
+		dropped = heap_insert(heap, p);
+		if (dropped == NULL) {
+			/*
+			 * The new task was inserted; the heap wasn't
+			 * previously full
+			 */
+			get_task_struct(p);
+		} else if (dropped != p) {
+			/*
+			 * The new task was inserted, and pushed out a
+			 * different task
+			 */
+			get_task_struct(p);
+			put_task_struct(dropped);
+		}
+		/*
+		 * Else the new task was newer than anything already in
+		 * the heap and wasn't inserted
+		 */
+	}
+	cgroup_iter_end(scan->cg, &it);
+
+	if (heap->size) {
+		for (i = 0; i < heap->size; i++) {
+			struct task_struct *q = heap->ptrs[i];
+			if (i == 0) {
+				latest_time = q->start_time;
+				latest_task = q;
+			}
+			/* Process the task per the caller's callback */
+			scan->process_task(q, scan);
+			put_task_struct(q);
+		}
+		/*
+		 * If we had to process any tasks at all, scan again
+		 * in case some of them were in the middle of forking
+		 * children that didn't get processed.
+		 * Not the most efficient way to do it, but it avoids
+		 * having to take callback_mutex in the fork path
+		 */
+		goto again;
+	}
+	if (heap == &tmp_heap)
+		heap_free(&tmp_heap);
+	return 0;
+}
+
+static void cgroup_transfer_one_task(struct task_struct *task,
+				     struct cgroup_scanner *scan)
+{
+	struct cgroup *new_cgroup = scan->data;
+
+	mutex_lock(&cgroup_mutex);
+	cgroup_attach_task(new_cgroup, task, false);
+	mutex_unlock(&cgroup_mutex);
+}
+
+/**
+ * cgroup_trasnsfer_tasks - move tasks from one cgroup to another
+ * @to: cgroup to which the tasks will be moved
+ * @from: cgroup in which the tasks currently reside
+ */
+int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from)
+{
+	struct cgroup_scanner scan;
+
+	scan.cg = from;
+	scan.test_task = NULL; /* select all tasks in cgroup */
+	scan.process_task = cgroup_transfer_one_task;
+	scan.heap = NULL;
+	scan.data = to;
+
+	return cgroup_scan_tasks(&scan);
+}
+
+/*
+ * Stuff for reading the 'tasks'/'procs' files.
+ *
+ * Reading this file can return large amounts of data if a cgroup has
+ * *lots* of attached tasks. So it may need several calls to read(),
+ * but we cannot guarantee that the information we produce is correct
+ * unless we produce it entirely atomically.
+ *
+ */
+
+/* which pidlist file are we talking about? */
+enum cgroup_filetype {
+	CGROUP_FILE_PROCS,
+	CGROUP_FILE_TASKS,
+};
+
+/*
+ * A pidlist is a list of pids that virtually represents the contents of one
+ * of the cgroup files ("procs" or "tasks"). We keep a list of such pidlists,
+ * a pair (one each for procs, tasks) for each pid namespace that's relevant
+ * to the cgroup.
+ */
+struct cgroup_pidlist {
+	/*
+	 * used to find which pidlist is wanted. doesn't change as long as
+	 * this particular list stays in the list.
+	*/
+	struct { enum cgroup_filetype type; struct pid_namespace *ns; } key;
+	/* array of xids */
+	pid_t *list;
+	/* how many elements the above list has */
+	int length;
+	/* how many files are using the current array */
+	int use_count;
+	/* each of these stored in a list by its cgroup */
+	struct list_head links;
+	/* pointer to the cgroup we belong to, for list removal purposes */
+	struct cgroup *owner;
+	/* protects the other fields */
+	struct rw_semaphore mutex;
+};
+
+/*
+ * The following two functions "fix" the issue where there are more pids
+ * than kmalloc will give memory for; in such cases, we use vmalloc/vfree.
+ * TODO: replace with a kernel-wide solution to this problem
+ */
+#define PIDLIST_TOO_LARGE(c) ((c) * sizeof(pid_t) > (PAGE_SIZE * 2))
+static void *pidlist_allocate(int count)
+{
+	if (PIDLIST_TOO_LARGE(count))
+		return vmalloc(count * sizeof(pid_t));
+	else
+		return kmalloc(count * sizeof(pid_t), GFP_KERNEL);
+}
+static void pidlist_free(void *p)
+{
+	if (is_vmalloc_addr(p))
+		vfree(p);
+	else
+		kfree(p);
+}
+
+/*
+ * pidlist_uniq - given a kmalloc()ed list, strip out all duplicate entries
+ * Returns the number of unique elements.
+ */
+static int pidlist_uniq(pid_t *list, int length)
+{
+	int src, dest = 1;
+
+	/*
+	 * we presume the 0th element is unique, so i starts at 1. trivial
+	 * edge cases first; no work needs to be done for either
+	 */
+	if (length == 0 || length == 1)
+		return length;
+	/* src and dest walk down the list; dest counts unique elements */
+	for (src = 1; src < length; src++) {
+		/* find next unique element */
+		while (list[src] == list[src-1]) {
+			src++;
+			if (src == length)
+				goto after;
+		}
+		/* dest always points to where the next unique element goes */
+		list[dest] = list[src];
+		dest++;
+	}
+after:
+	return dest;
+}
+
+static int cmppid(const void *a, const void *b)
+{
+	return *(pid_t *)a - *(pid_t *)b;
+}
+
+/*
+ * find the appropriate pidlist for our purpose (given procs vs tasks)
+ * returns with the lock on that pidlist already held, and takes care
+ * of the use count, or returns NULL with no locks held if we're out of
+ * memory.
+ */
+static struct cgroup_pidlist *cgroup_pidlist_find(struct cgroup *cgrp,
+						  enum cgroup_filetype type)
+{
+	struct cgroup_pidlist *l;
+	/* don't need task_nsproxy() if we're looking at ourself */
+	struct pid_namespace *ns = task_active_pid_ns(current);
+
+	/*
+	 * We can't drop the pidlist_mutex before taking the l->mutex in case
+	 * the last ref-holder is trying to remove l from the list at the same
+	 * time. Holding the pidlist_mutex precludes somebody taking whichever
+	 * list we find out from under us - compare release_pid_array().
+	 */
+	mutex_lock(&cgrp->pidlist_mutex);
+	list_for_each_entry(l, &cgrp->pidlists, links) {
+		if (l->key.type == type && l->key.ns == ns) {
+			/* make sure l doesn't vanish out from under us */
+			down_write(&l->mutex);
+			mutex_unlock(&cgrp->pidlist_mutex);
+			return l;
+		}
+	}
+	/* entry not found; create a new one */
+	l = kmalloc(sizeof(struct cgroup_pidlist), GFP_KERNEL);
+	if (!l) {
+		mutex_unlock(&cgrp->pidlist_mutex);
+		return l;
+	}
+	init_rwsem(&l->mutex);
+	down_write(&l->mutex);
+	l->key.type = type;
+	l->key.ns = get_pid_ns(ns);
+	l->use_count = 0; /* don't increment here */
+	l->list = NULL;
+	l->owner = cgrp;
+	list_add(&l->links, &cgrp->pidlists);
+	mutex_unlock(&cgrp->pidlist_mutex);
+	return l;
+}
+
+/*
+ * Load a cgroup's pidarray with either procs' tgids or tasks' pids
+ */
+static int pidlist_array_load(struct cgroup *cgrp, enum cgroup_filetype type,
+			      struct cgroup_pidlist **lp)
+{
+	pid_t *array;
+	int length;
+	int pid, n = 0; /* used for populating the array */
+	struct cgroup_iter it;
+	struct task_struct *tsk;
+	struct cgroup_pidlist *l;
+
+	/*
+	 * If cgroup gets more users after we read count, we won't have
+	 * enough space - tough.  This race is indistinguishable to the
+	 * caller from the case that the additional cgroup users didn't
+	 * show up until sometime later on.
+	 */
+	length = cgroup_task_count(cgrp);
+	array = pidlist_allocate(length);
+	if (!array)
+		return -ENOMEM;
+	/* now, populate the array */
+	cgroup_iter_start(cgrp, &it);
+	while ((tsk = cgroup_iter_next(cgrp, &it))) {
+		if (unlikely(n == length))
+			break;
+		/* get tgid or pid for procs or tasks file respectively */
+		if (type == CGROUP_FILE_PROCS)
+			pid = task_tgid_vnr(tsk);
+		else
+			pid = task_pid_vnr(tsk);
+		if (pid > 0) /* make sure to only use valid results */
+			array[n++] = pid;
+	}
+	cgroup_iter_end(cgrp, &it);
+	length = n;
+	/* now sort & (if procs) strip out duplicates */
+	sort(array, length, sizeof(pid_t), cmppid, NULL);
+	if (type == CGROUP_FILE_PROCS)
+		length = pidlist_uniq(array, length);
+	l = cgroup_pidlist_find(cgrp, type);
+	if (!l) {
+		pidlist_free(array);
+		return -ENOMEM;
+	}
+	/* store array, freeing old if necessary - lock already held */
+	pidlist_free(l->list);
+	l->list = array;
+	l->length = length;
+	l->use_count++;
+	up_write(&l->mutex);
+	*lp = l;
+	return 0;
+}
+
+/**
+ * cgroupstats_build - build and fill cgroupstats
+ * @stats: cgroupstats to fill information into
+ * @dentry: A dentry entry belonging to the cgroup for which stats have
+ * been requested.
+ *
+ * Build and fill cgroupstats so that taskstats can export it to user
+ * space.
+ */
+int cgroupstats_build(struct cgroupstats *stats, struct dentry *dentry)
+{
+	int ret = -EINVAL;
+	struct cgroup *cgrp;
+	struct cgroup_iter it;
+	struct task_struct *tsk;
+
+	/*
+	 * Validate dentry by checking the superblock operations,
+	 * and make sure it's a directory.
+	 */
+	if (dentry->d_sb->s_op != &cgroup_ops ||
+	    !S_ISDIR(dentry->d_inode->i_mode))
+		 goto err;
+
+	ret = 0;
+	cgrp = dentry->d_fsdata;
+
+	cgroup_iter_start(cgrp, &it);
+	while ((tsk = cgroup_iter_next(cgrp, &it))) {
+		switch (tsk->state) {
+		case TASK_RUNNING:
+			stats->nr_running++;
+			break;
+		case TASK_INTERRUPTIBLE:
+			stats->nr_sleeping++;
+			break;
+		case TASK_UNINTERRUPTIBLE:
+			stats->nr_uninterruptible++;
+			break;
+		case TASK_STOPPED:
+			stats->nr_stopped++;
+			break;
+		default:
+			if (delayacct_is_task_waiting_on_io(tsk))
+				stats->nr_io_wait++;
+			break;
+		}
+	}
+	cgroup_iter_end(cgrp, &it);
+
+err:
+	return ret;
+}
+
+
+/*
+ * seq_file methods for the tasks/procs files. The seq_file position is the
+ * next pid to display; the seq_file iterator is a pointer to the pid
+ * in the cgroup->l->list array.
+ */
+
+static void *cgroup_pidlist_start(struct seq_file *s, loff_t *pos)
+{
+	/*
+	 * Initially we receive a position value that corresponds to
+	 * one more than the last pid shown (or 0 on the first call or
+	 * after a seek to the start). Use a binary-search to find the
+	 * next pid to display, if any
+	 */
+	struct cgroup_pidlist *l = s->private;
+	int index = 0, pid = *pos;
+	int *iter;
+
+	down_read(&l->mutex);
+	if (pid) {
+		int end = l->length;
+
+		while (index < end) {
+			int mid = (index + end) / 2;
+			if (l->list[mid] == pid) {
+				index = mid;
+				break;
+			} else if (l->list[mid] <= pid)
+				index = mid + 1;
+			else
+				end = mid;
+		}
+	}
+	/* If we're off the end of the array, we're done */
+	if (index >= l->length)
+		return NULL;
+	/* Update the abstract position to be the actual pid that we found */
+	iter = l->list + index;
+	*pos = *iter;
+	return iter;
+}
+
+static void cgroup_pidlist_stop(struct seq_file *s, void *v)
+{
+	struct cgroup_pidlist *l = s->private;
+	up_read(&l->mutex);
+}
+
+static void *cgroup_pidlist_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	struct cgroup_pidlist *l = s->private;
+	pid_t *p = v;
+	pid_t *end = l->list + l->length;
+	/*
+	 * Advance to the next pid in the array. If this goes off the
+	 * end, we're done
+	 */
+	p++;
+	if (p >= end) {
+		return NULL;
+	} else {
+		*pos = *p;
+		return p;
+	}
+}
+
+static int cgroup_pidlist_show(struct seq_file *s, void *v)
+{
+	return seq_printf(s, "%d\n", *(int *)v);
+}
+
+/*
+ * seq_operations functions for iterating on pidlists through seq_file -
+ * independent of whether it's tasks or procs
+ */
+static const struct seq_operations cgroup_pidlist_seq_operations = {
+	.start = cgroup_pidlist_start,
+	.stop = cgroup_pidlist_stop,
+	.next = cgroup_pidlist_next,
+	.show = cgroup_pidlist_show,
+};
+
+static void cgroup_release_pid_array(struct cgroup_pidlist *l)
+{
+	/*
+	 * the case where we're the last user of this particular pidlist will
+	 * have us remove it from the cgroup's list, which entails taking the
+	 * mutex. since in pidlist_find the pidlist->lock depends on cgroup->
+	 * pidlist_mutex, we have to take pidlist_mutex first.
+	 */
+	mutex_lock(&l->owner->pidlist_mutex);
+	down_write(&l->mutex);
+	BUG_ON(!l->use_count);
+	if (!--l->use_count) {
+		/* we're the last user if refcount is 0; remove and free */
+		list_del(&l->links);
+		mutex_unlock(&l->owner->pidlist_mutex);
+		pidlist_free(l->list);
+		put_pid_ns(l->key.ns);
+		up_write(&l->mutex);
+		kfree(l);
+		return;
+	}
+	mutex_unlock(&l->owner->pidlist_mutex);
+	up_write(&l->mutex);
+}
+
+static int cgroup_pidlist_release(struct inode *inode, struct file *file)
+{
+	struct cgroup_pidlist *l;
+	if (!(file->f_mode & FMODE_READ))
+		return 0;
+	/*
+	 * the seq_file will only be initialized if the file was opened for
+	 * reading; hence we check if it's not null only in that case.
+	 */
+	l = ((struct seq_file *)file->private_data)->private;
+	cgroup_release_pid_array(l);
+	return seq_release(inode, file);
+}
+
+static const struct file_operations cgroup_pidlist_operations = {
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.write = cgroup_file_write,
+	.release = cgroup_pidlist_release,
+};
+
+/*
+ * The following functions handle opens on a file that displays a pidlist
+ * (tasks or procs). Prepare an array of the process/thread IDs of whoever's
+ * in the cgroup.
+ */
+/* helper function for the two below it */
+static int cgroup_pidlist_open(struct file *file, enum cgroup_filetype type)
+{
+	struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
+	struct cgroup_pidlist *l;
+	int retval;
+
+	/* Nothing to do for write-only files */
+	if (!(file->f_mode & FMODE_READ))
+		return 0;
+
+	/* have the array populated */
+	retval = pidlist_array_load(cgrp, type, &l);
+	if (retval)
+		return retval;
+	/* configure file information */
+	file->f_op = &cgroup_pidlist_operations;
+
+	retval = seq_open(file, &cgroup_pidlist_seq_operations);
+	if (retval) {
+		cgroup_release_pid_array(l);
+		return retval;
+	}
+	((struct seq_file *)file->private_data)->private = l;
+	return 0;
+}
+static int cgroup_tasks_open(struct inode *unused, struct file *file)
+{
+	return cgroup_pidlist_open(file, CGROUP_FILE_TASKS);
+}
+static int cgroup_procs_open(struct inode *unused, struct file *file)
+{
+	return cgroup_pidlist_open(file, CGROUP_FILE_PROCS);
+}
+
+static u64 cgroup_read_notify_on_release(struct cgroup *cgrp,
+					    struct cftype *cft)
+{
+	return notify_on_release(cgrp);
+}
+
+static int cgroup_write_notify_on_release(struct cgroup *cgrp,
 					  struct cftype *cft,
 					  u64 val)
 {
@@ -4674,7 +4704,7 @@ EXPORT_SYMBOL_GPL(cgroup_load_subsys);
  */
 void cgroup_unload_subsys(struct cgroup_subsys *ss)
 {
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 
 	BUG_ON(ss->module == NULL);
 
@@ -4703,8 +4733,8 @@ void cgroup_unload_subsys(struct cgroup_subsys *ss)
 	 * in loading, we need to pay our respects to the hashtable gods.
 	 */
 	write_lock(&css_set_lock);
-	list_for_each_entry(link, &dummytop->css_sets, cgrp_link_list) {
-		struct css_set *cset = link->cg;
+	list_for_each_entry(link, &dummytop->cset_links, cset_link) {
+		struct css_set *cset = link->cset;
 		unsigned long key;
 
 		hash_del(&cset->hlist);
@@ -4737,7 +4767,7 @@ int __init cgroup_init_early(void)
 {
 	int i;
 	atomic_set(&init_css_set.refcount, 1);
-	INIT_LIST_HEAD(&init_css_set.cg_links);
+	INIT_LIST_HEAD(&init_css_set.cgrp_links);
 	INIT_LIST_HEAD(&init_css_set.tasks);
 	INIT_HLIST_NODE(&init_css_set.hlist);
 	css_set_count = 1;
@@ -4745,12 +4775,10 @@ int __init cgroup_init_early(void)
 	root_count = 1;
 	init_task.cgroups = &init_css_set;
 
-	init_css_set_link.cg = &init_css_set;
-	init_css_set_link.cgrp = dummytop;
-	list_add(&init_css_set_link.cgrp_link_list,
-		 &rootnode.top_cgroup.css_sets);
-	list_add(&init_css_set_link.cg_link_list,
-		 &init_css_set.cg_links);
+	init_cgrp_cset_link.cset = &init_css_set;
+	init_cgrp_cset_link.cgrp = dummytop;
+	list_add(&init_cgrp_cset_link.cset_link, &rootnode.top_cgroup.cset_links);
+	list_add(&init_cgrp_cset_link.cgrp_link, &init_css_set.cgrp_links);
 
 	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
 		struct cgroup_subsys *ss = subsys[i];
@@ -5519,13 +5547,13 @@ static int current_css_set_cg_links_read(struct cgroup *cont,
 					 struct cftype *cft,
 					 struct seq_file *seq)
 {
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 	struct css_set *cset;
 
 	read_lock(&css_set_lock);
 	rcu_read_lock();
 	cset = rcu_dereference(current->cgroups);
-	list_for_each_entry(link, &cset->cg_links, cg_link_list) {
+	list_for_each_entry(link, &cset->cgrp_links, cgrp_link) {
 		struct cgroup *c = link->cgrp;
 		const char *name;
 
@@ -5546,11 +5574,11 @@ static int cgroup_css_links_read(struct cgroup *cont,
 				 struct cftype *cft,
 				 struct seq_file *seq)
 {
-	struct cg_cgroup_link *link;
+	struct cgrp_cset_link *link;
 
 	read_lock(&css_set_lock);
-	list_for_each_entry(link, &cont->css_sets, cgrp_link_list) {
-		struct css_set *cset = link->cg;
+	list_for_each_entry(link, &cont->cset_links, cset_link) {
+		struct css_set *cset = link->cset;
 		struct task_struct *task;
 		int count = 0;
 		seq_printf(seq, "css_set %p\n", cset);
