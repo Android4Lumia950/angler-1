@@ -275,47 +275,9 @@ static int cgroup_idr_alloc(struct idr *idr, void *ptr, int start, int end,
 }
 
 /* convenient tests for these bits */
-static inline bool cgroup_is_removed(const struct cgroup *cgrp)
+static inline bool cgroup_is_dead(const struct cgroup *cgrp)
 {
-	void *ret;
-
-	spin_lock_bh(&cgroup_idr_lock);
-	ret = idr_replace(idr, ptr, id);
-	spin_unlock_bh(&cgroup_idr_lock);
-	return ret;
-}
-
-static void cgroup_idr_remove(struct idr *idr, int id)
-{
-	spin_lock_bh(&cgroup_idr_lock);
-	idr_remove(idr, id);
-	spin_unlock_bh(&cgroup_idr_lock);
-}
-
-/* subsystems visibly enabled on a cgroup */
-static u16 cgroup_control(struct cgroup *cgrp)
-{
-	struct cgroup *parent = cgroup_parent(cgrp);
-	u16 root_ss_mask = cgrp->root->subsys_mask;
-
-	if (parent)
-		return parent->subtree_control;
-
-	if (cgroup_on_dfl(cgrp))
-		root_ss_mask &= ~(cgrp_dfl_inhibit_ss_mask |
-				  cgrp_dfl_implicit_ss_mask);
-	return root_ss_mask;
-}
-
-/* subsystems enabled on a cgroup */
-static u16 cgroup_ss_mask(struct cgroup *cgrp)
-{
-	struct cgroup *parent = cgroup_parent(cgrp);
-
-	if (parent)
-		return parent->subtree_ss_mask;
-
-	return cgrp->root->subsys_mask;
+	return test_bit(CGRP_DEAD, &cgrp->flags);
 }
 
 /**
@@ -457,74 +419,15 @@ static int notify_on_release(const struct cgroup *cgrp)
  *
  * Should be called under cgroup_[tree_]mutex.
  */
-#define for_each_e_css(css, ssid, cgrp)					\
-	for ((ssid) = 0; (ssid) < CGROUP_SUBSYS_COUNT; (ssid)++)	\
-		if (!((css) = cgroup_e_css(cgrp, cgroup_subsys[(ssid)]))) \
-			;						\
-		else
-
-/**
- * for_each_subsys - iterate all enabled cgroup subsystems
- * @ss: the iteration cursor
- * @ssid: the index of @ss, CGROUP_SUBSYS_COUNT after reaching the end
- */
-#define for_each_subsys(ss, ssid)					\
-	for ((ssid) = 0; (ssid) < CGROUP_SUBSYS_COUNT &&		\
-	     (((ss) = cgroup_subsys[ssid]) || true); (ssid)++)
-
-/**
- * do_each_subsys_mask - filter for_each_subsys with a bitmask
- * @ss: the iteration cursor
- * @ssid: the index of @ss, CGROUP_SUBSYS_COUNT after reaching the end
- * @ss_mask: the bitmask
- *
- * The block will only run for cases where the ssid-th bit (1 << ssid) of
- * @ss_mask is set.
- */
-#define do_each_subsys_mask(ss, ssid, ss_mask) do {			\
-	unsigned long __ss_mask = (ss_mask);				\
-	if (!CGROUP_SUBSYS_COUNT) { /* to avoid spurious gcc warning */	\
-		(ssid) = 0;						\
-		break;							\
-	}								\
-	for_each_set_bit(ssid, &__ss_mask, CGROUP_SUBSYS_COUNT) {	\
-		(ss) = cgroup_subsys[ssid];				\
-		{
-
-#define while_each_subsys_mask()					\
-		}							\
-	}								\
-} while (false)
-
-/* iterate across the hierarchies */
-#define for_each_root(root)						\
-	list_for_each_entry((root), &cgroup_roots, root_list)
-
-/* iterate over child cgrps, lock should be held throughout iteration */
-#define cgroup_for_each_live_child(child, cgrp)				\
-	list_for_each_entry((child), &(cgrp)->self.children, self.sibling) \
-		if (({ lockdep_assert_held(&cgroup_mutex);		\
-		       cgroup_is_dead(child); }))			\
-			;						\
-		else
-
-/* walk live descendants in preorder */
-#define cgroup_for_each_live_descendant_pre(dsct, d_css, cgrp)		\
-	css_for_each_descendant_pre((d_css), cgroup_css((cgrp), NULL))	\
-		if (({ lockdep_assert_held(&cgroup_mutex);		\
-		       (dsct) = (d_css)->cgroup;			\
-		       cgroup_is_dead(dsct); }))			\
-			;						\
-		else
-
-/* walk live descendants in postorder */
-#define cgroup_for_each_live_descendant_post(dsct, d_css, cgrp)		\
-	css_for_each_descendant_post((d_css), cgroup_css((cgrp), NULL))	\
-		if (({ lockdep_assert_held(&cgroup_mutex);		\
-		       (dsct) = (d_css)->cgroup;			\
-		       cgroup_is_dead(dsct); }))			\
-			;						\
-		else
+static bool cgroup_lock_live_group(struct cgroup *cgrp)
+{
+	mutex_lock(&cgroup_mutex);
+	if (cgroup_is_dead(cgrp)) {
+		mutex_unlock(&cgroup_mutex);
+		return false;
+	}
+	return true;
+}
 
 static void cgroup_release_agent(struct work_struct *work);
 static void check_for_release(struct cgroup *cgrp);
@@ -1342,8 +1245,50 @@ static struct cgroup *cgroup_kn_lock_live(struct kernfs_node *kn,
 	if (!cgroup_is_dead(cgrp))
 		return cgrp;
 
-	cgroup_kn_unlock(kn);
-	return NULL;
+	kfree(rcu_dereference_raw(cgrp->name));
+	kfree(cgrp);
+}
+
+static void cgroup_free_rcu(struct rcu_head *head)
+{
+	struct cgroup *cgrp = container_of(head, struct cgroup, rcu_head);
+
+	queue_work(cgroup_destroy_wq, &cgrp->free_work);
+}
+
+static void cgroup_diput(struct dentry *dentry, struct inode *inode)
+{
+	/* is dentry a directory ? if so, kfree() associated cgroup */
+	if (S_ISDIR(inode->i_mode)) {
+		struct cgroup *cgrp = dentry->d_fsdata;
+
+		BUG_ON(!(cgroup_is_dead(cgrp)));
+		call_rcu(&cgrp->rcu_head, cgroup_free_rcu);
+	} else {
+		struct cfent *cfe = __d_cfe(dentry);
+		struct cgroup *cgrp = dentry->d_parent->d_fsdata;
+
+		WARN_ONCE(!list_empty(&cfe->node) &&
+			  cgrp != &cgrp->root->top_cgroup,
+			  "cfe still linked for %s\n", cfe->type->name);
+		simple_xattrs_free(&cfe->xattrs);
+		kfree(cfe);
+	}
+	iput(inode);
+}
+
+static int cgroup_delete(const struct dentry *d)
+{
+	return 1;
+}
+
+static void remove_dir(struct dentry *d)
+{
+	struct dentry *parent = dget(d->d_parent);
+
+	d_delete(d);
+	simple_rmdir(parent->d_inode, d);
+	dput(parent);
 }
 
 static void cgroup_rm_file(struct cgroup *cgrp, const struct cftype *cft)
@@ -3177,7 +3122,7 @@ static ssize_t cgroup_file_write(struct file *file, const char __user *buf,
 	struct cftype *cft = __d_cft(file->f_dentry);
 	struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
 
-	if (cgroup_is_removed(cgrp))
+	if (cgroup_is_dead(cgrp))
 		return -ENODEV;
 	if (cft->write)
 		return cft->write(cgrp, cft, file, buf, nbytes, ppos);
@@ -3222,7 +3167,7 @@ static ssize_t cgroup_file_read(struct file *file, char __user *buf,
 	struct cftype *cft = __d_cft(file->f_dentry);
 	struct cgroup *cgrp = __d_cgrp(file->f_dentry->d_parent);
 
-	if (cgroup_is_removed(cgrp))
+	if (cgroup_is_dead(cgrp))
 		return -ENODEV;
 
 	if (cft->read)
@@ -4198,7 +4143,29 @@ int cgroup_rm_cftypes(struct cftype *cfts)
 	mutex_lock(&cgroup_mutex);
 	ret = cgroup_rm_cftypes_locked(cfts);
 	mutex_unlock(&cgroup_mutex);
-	return ret;
+
+	/*
+	 * All new cgroups will see @cfts update on @ss->cftsets.  Add/rm
+	 * files for all cgroups which were created before.
+	 */
+	list_for_each_entry_safe(cgrp, n, &pending, cft_q_node) {
+		struct inode *inode = cgrp->dentry->d_inode;
+
+		mutex_lock(&inode->i_mutex);
+		mutex_lock(&cgroup_mutex);
+		if (!cgroup_is_dead(cgrp))
+			cgroup_addrm_files(cgrp, ss, cfts, is_add);
+		mutex_unlock(&cgroup_mutex);
+		mutex_unlock(&inode->i_mutex);
+
+		list_del_init(&cgrp->cft_q_node);
+		dput(cgrp->dentry);
+	}
+
+	if (sb)
+		deactivate_super(sb);
+
+	mutex_unlock(&cgroup_cft_mutex);
 }
 
 /**
@@ -4403,14 +4370,14 @@ struct cgroup *cgroup_next_sibling(struct cgroup *pos)
 	/*
 	 * @pos could already have been removed.  Once a cgroup is removed,
 	 * its ->sibling.next is no longer updated when its next sibling
-	 * changes.  As CGRP_REMOVED is set on removal which is fully
+	 * changes.  As CGRP_DEAD is set on removal which is fully
 	 * serialized, if we see it unasserted, it's guaranteed that the
 	 * next sibling hasn't finished its grace period even if it's
 	 * already removed, and thus safe to dereference from this RCU
 	 * critical section.  If ->sibling.next is inaccessible,
-	 * cgroup_is_removed() is guaranteed to be visible as %true here.
+	 * cgroup_is_dead() is guaranteed to be visible as %true here.
 	 */
-	if (likely(!cgroup_is_removed(pos))) {
+	if (likely(!cgroup_is_dead(pos))) {
 		next = list_entry_rcu(pos->sibling.next, struct cgroup, sibling);
 		if (&next->sibling != &pos->parent->children)
 			return next;
@@ -5864,7 +5831,7 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	 * attempts fail thus maintaining the removal conditions verified
 	 * above.
 	 *
-	 * Note that CGRP_REMVOED clearing is depended upon by
+	 * Note that CGRP_DEAD assertion is depended upon by
 	 * cgroup_next_sibling() to resume iteration after dropping RCU
 	 * read lock.  See cgroup_next_sibling() for details.
 	 */
@@ -5874,7 +5841,7 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 		WARN_ON(atomic_read(&css->refcnt) < 0);
 		atomic_add(CSS_DEACT_BIAS, &css->refcnt);
 	}
-	set_bit(CGRP_REMOVED, &cgrp->flags);
+	set_bit(CGRP_DEAD, &cgrp->flags);
 
 	/* tell subsystems to initate destruction */
 	for_each_subsys(cgrp->root, ss)
@@ -6686,9 +6653,27 @@ void cgroup_free(struct task_struct *task)
 
 static void check_for_release(struct cgroup *cgrp)
 {
-	if (notify_on_release(cgrp) && !cgroup_is_populated(cgrp) &&
-	    !css_has_online_children(&cgrp->self) && !cgroup_is_dead(cgrp))
-		schedule_work(&cgrp->release_agent_work);
+	/* All of these checks rely on RCU to keep the cgroup
+	 * structure alive */
+	if (cgroup_is_releasable(cgrp) &&
+	    !atomic_read(&cgrp->count) && list_empty(&cgrp->children)) {
+		/*
+		 * Control Group is currently removeable. If it's not
+		 * already queued for a userspace notification, queue
+		 * it now
+		 */
+		int need_schedule_work = 0;
+
+		raw_spin_lock(&release_list_lock);
+		if (!cgroup_is_dead(cgrp) &&
+		    list_empty(&cgrp->release_list)) {
+			list_add(&cgrp->release_list, &release_list);
+			need_schedule_work = 1;
+		}
+		raw_spin_unlock(&release_list_lock);
+		if (need_schedule_work)
+			schedule_work(&release_agent_work);
+	}
 }
 
 /*
@@ -6780,7 +6765,12 @@ static int __init cgroup_disable(char *str)
 }
 __setup("cgroup_disable=", cgroup_disable);
 
-static int __init cgroup_no_v1(char *str)
+/*
+ * Functons for CSS ID.
+ */
+
+/* to get ID other than 0, this should be called when !cgroup_is_dead() */
+unsigned short css_id(struct cgroup_subsys_state *css)
 {
 	struct cgroup_subsys *ss;
 	char *token;
