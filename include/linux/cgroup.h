@@ -221,10 +221,10 @@ struct cgroup {
 	struct cgroupfs_root *root;
 
 	/*
-	 * List of cg_cgroup_links pointing at css_sets with
-	 * tasks in this cgroup. Protected by css_set_lock
+	 * List of cgrp_cset_links pointing at css_sets with tasks in this
+	 * cgroup.  Protected by css_set_lock.
 	 */
-	struct list_head css_sets;
+	struct list_head cset_links;
 
 	struct list_head allcg_node;	/* cgroupfs_root->allcg_list */
 	struct list_head cft_q_node;	/* used during cftype add/rm */
@@ -378,11 +378,10 @@ struct css_set {
 	struct list_head tasks;
 
 	/*
-	 * List of cg_cgroup_link objects on link chains from
-	 * cgroups referenced from this css_set. Protected by
-	 * css_set_lock
+	 * List of cgrp_cset_links pointing at cgroups referenced from this
+	 * css_set.  Protected by css_set_lock.
 	 */
-	struct list_head cg_links;
+	struct list_head cgrp_links;
 
 	/*
 	 * Set of subsystem states, one for each subsystem. This array
@@ -831,39 +830,11 @@ static inline bool task_under_cgroup_hierarchy(struct task_struct *task,
 {
 	struct css_set *cset = task_css_set(task);
 
-	return cgroup_is_descendant(cset->dfl_cgrp, ancestor);
-}
-
-/* no synchronization, the result can only be used as a hint */
-static inline bool cgroup_is_populated(struct cgroup *cgrp)
-{
-	return cgrp->populated_cnt;
-}
-
-/* returns ino associated with a cgroup */
-static inline ino_t cgroup_ino(struct cgroup *cgrp)
-{
-	return cgrp->kn->ino;
-}
-
-/* cft/css accessors for cftype->write() operation */
-static inline struct cftype *of_cft(struct kernfs_open_file *of)
-{
-	return of->kn->priv;
-}
-
-struct cgroup_subsys_state *of_css(struct kernfs_open_file *of);
-
-/* cft/css accessors for cftype->seq_*() operations */
-static inline struct cftype *seq_cft(struct seq_file *seq)
-{
-	return of_cft(seq->private);
-}
-
-static inline struct cgroup_subsys_state *seq_css(struct seq_file *seq)
-{
-	return of_css(seq->private);
-}
+/* A cgroup_iter should be treated as an opaque object */
+struct cgroup_iter {
+	struct list_head *cset_link;
+	struct list_head *task;
+};
 
 /*
  * Name / path handling functions.  All are thin wrappers around the kernfs
