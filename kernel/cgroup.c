@@ -208,36 +208,7 @@ static DEFINE_IDR(cgroup_hierarchy_idr);
  */
 static u64 css_serial_nr_next = 1;
 
-/*
- * These bitmask flags indicate whether tasks in the fork and exit paths have
- * fork/exit handlers to call. This avoids us having to do extra work in the
- * fork/exit path to check which subsystems have fork/exit callbacks.
- */
-static u16 have_fork_callback __read_mostly;
-static u16 have_exit_callback __read_mostly;
-static u16 have_free_callback __read_mostly;
-
-/* cgroup namespace for init task */
-struct cgroup_namespace init_cgroup_ns = {
-	.count		= { .counter = 2, },
-	.user_ns	= &init_user_ns,
-	.ns.ops		= &cgroupns_operations,
-	.ns.inum	= PROC_CGROUP_INIT_INO,
-	.root_cset	= &init_css_set,
-};
-
-/* Ditto for the can_fork callback. */
-static u16 have_canfork_callback __read_mostly;
-
-static struct file_system_type cgroup2_fs_type;
-static struct cftype cgroup_dfl_base_files[];
-static struct cftype cgroup_legacy_base_files[];
-
-static int rebind_subsystems(struct cgroup_root *dst_root, u16 ss_mask);
-static void cgroup_lock_and_drain_offline(struct cgroup *cgrp);
-static int cgroup_apply_control(struct cgroup *cgrp);
-static void cgroup_finalize_control(struct cgroup *cgrp, int ret);
-static void css_task_iter_advance(struct css_task_iter *it);
+static void cgroup_offline_fn(struct work_struct *work);
 static int cgroup_destroy_locked(struct cgroup *cgrp);
 static struct cgroup_subsys_state *css_create(struct cgroup *cgrp,
 					      struct cgroup_subsys *ss);
@@ -279,11 +250,7 @@ static inline bool cgroup_is_dead(const struct cgroup *cgrp)
  *
  * Return @cgrp's css (cgroup_subsys_state) associated with @ss.  This
  * function must be called either under cgroup_mutex or rcu_read_lock() and
- * the caller is responsible for pinning the returned css if it wants to
- * keep accessing it outside the said locks.  This function may return
- * %NULL if @cgrp doesn't have @subsys_id enabled.
- */
-static struct cgroup_subsys_state *cgroup_css(struct cgroup *cgrp,
+ * the caller is responsib=s_state *cgroup_css(struct cgroup *cgrp,
 					      struct cgroup_subsys *ss)
 {
 	if (ss)
@@ -1140,7 +1107,18 @@ static umode_t cgroup_file_mode(const struct cftype *cft)
  */
 static u16 cgroup_calc_subtree_ss_mask(u16 subtree_control, u16 this_ss_mask)
 {
-	u16 cur_ss_mask = subtree_control;
+	struct cgroup_name *name;
+
+	name = kmalloc(sizeof(*name) + dentry->d_name.len + 1, GFP_KERNEL);
+	if (!name)
+		return NULL;
+	strcpy(name->name, dentry->d_name.name);
+	return name;
+}
+
+static void cgroup_free_fn(struct work_struct *work)
+{
+	struct cgroup *cgrp = container_of(work, struct cgroup, destroy_work);
 	struct cgroup_subsys *ss;
 	int ssid;
 
@@ -1248,7 +1226,8 @@ static void cgroup_free_rcu(struct rcu_head *head)
 {
 	struct cgroup *cgrp = container_of(head, struct cgroup, rcu_head);
 
-	schedule_work(&cgrp->free_work);
+	INIT_WORK(&cgrp->destroy_work, cgroup_free_fn);
+	schedule_work(&cgrp->destroy_work);
 }
 
 static void cgroup_diput(struct dentry *dentry, struct inode *inode)
@@ -4464,12 +4443,13 @@ struct cgroup *cgroup_next_sibling(struct cgroup *pos)
 	/*
 	 * @pos could already have been removed.  Once a cgroup is removed,
 	 * its ->sibling.next is no longer updated when its next sibling
-	 * changes.  As CGRP_DEAD is set on removal which is fully
-	 * serialized, if we see it unasserted, it's guaranteed that the
-	 * next sibling hasn't finished its grace period even if it's
-	 * already removed, and thus safe to dereference from this RCU
-	 * critical section.  If ->sibling.next is inaccessible,
-	 * cgroup_is_dead() is guaranteed to be visible as %true here.
+	 * changes.  As CGRP_DEAD assertion is serialized and happens
+	 * before the cgroup is taken off the ->sibling list, if we see it
+	 * unasserted, it's guaranteed that the next sibling hasn't
+	 * finished its grace period even if it's already removed, and thus
+	 * safe to dereference from this RCU critical section.  If
+	 * ->sibling.next is inaccessible, cgroup_is_dead() is guaranteed
+	 * to be visible as %true here.
 	 */
 	if (likely(!cgroup_is_dead(pos))) {
 		next = list_entry_rcu(pos->sibling.next, struct cgroup, sibling);
@@ -5909,7 +5889,6 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	__releases(&cgroup_mutex) __acquires(&cgroup_mutex)
 {
 	struct dentry *d = cgrp->dentry;
-	struct cgroup *parent = cgrp->parent;
 	struct cgroup_event *event, *tmp;
 	struct cgroup_subsys *ss;
 	bool empty;
@@ -5973,6 +5952,21 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	}
 	spin_unlock(&cgrp->event_list_lock);
 
+	INIT_WORK(&cgrp->destroy_work, cgroup_offline_fn);
+	schedule_work(&cgrp->destroy_work);
+
+	return 0;
+};
+
+static void cgroup_offline_fn(struct work_struct *work)
+{
+	struct cgroup *cgrp = container_of(work, struct cgroup, destroy_work);
+	struct cgroup *parent = cgrp->parent;
+	struct dentry *d = cgrp->dentry;
+	struct cgroup_subsys *ss;
+
+	mutex_lock(&cgroup_mutex);
+
 	/* tell subsystems to initate destruction */
 	for_each_subsys(cgrp->root, ss)
 		offline_css(ss, cgrp);
@@ -5996,7 +5990,7 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	set_bit(CGRP_RELEASABLE, &parent->flags);
 	check_for_release(parent);
 
-	return 0;
+	mutex_unlock(&cgroup_mutex);
 }
 
 static int cgroup_rmdir(struct inode *unused_dir, struct dentry *dentry)
