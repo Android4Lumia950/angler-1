@@ -7270,8 +7270,7 @@ int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
 #endif /* CONFIG_CGROUP_BPF */
 
 #ifdef CONFIG_CGROUP_DEBUG
-static struct cgroup_subsys_state *
-debug_css_alloc(struct cgroup_subsys_state *parent_css)
+static struct cgroup_subsys_state *debug_css_alloc(struct cgroup *cgrp)
 {
 	struct cgroup_subsys_state *css = kzalloc(sizeof(*css), GFP_KERNEL);
 
@@ -7281,22 +7280,22 @@ debug_css_alloc(struct cgroup_subsys_state *parent_css)
 	return css;
 }
 
-static void debug_css_free(struct cgroup_subsys_state *css)
+static void debug_css_free(struct cgroup *cgrp)
 {
-	kfree(css);
+	kfree(cgrp->subsys[debug_subsys_id]);
 }
 
-static u64 debug_taskcount_read(struct cgroup *cont, struct cftype *cft)
+static u64 debug_taskcount_read(struct cgroup *cgrp, struct cftype *cft)
 {
-	return cgroup_task_count(cont);
+	return cgroup_task_count(cgrp);
 }
 
-static u64 current_css_set_read(struct cgroup *cont, struct cftype *cft)
+static u64 current_css_set_read(struct cgroup *cgrp, struct cftype *cft)
 {
 	return (u64)(unsigned long)current->cgroups;
 }
 
-static u64 current_css_set_refcount_read(struct cgroup_subsys_state *css,
+static u64 current_css_set_refcount_read(struct cgroup *cgrp,
 					 struct cftype *cft)
 {
 	u64 count;
@@ -7307,7 +7306,9 @@ static u64 current_css_set_refcount_read(struct cgroup_subsys_state *css,
 	return count;
 }
 
-static int current_css_set_cg_links_read(struct seq_file *seq, void *v)
+static int current_css_set_cg_links_read(struct cgroup *cgrp,
+					 struct cftype *cft,
+					 struct seq_file *seq)
 {
 	struct cgrp_cset_link *link;
 	struct css_set *cset;
@@ -7333,14 +7334,14 @@ static int current_css_set_cg_links_read(struct seq_file *seq, void *v)
 }
 
 #define MAX_TASKS_SHOWN_PER_CSS 25
-static int cgroup_css_links_read(struct cgroup *cont,
+static int cgroup_css_links_read(struct cgroup *cgrp,
 				 struct cftype *cft,
 				 struct seq_file *seq)
 {
 	struct cgrp_cset_link *link;
 
 	read_lock(&css_set_lock);
-	list_for_each_entry(link, &cont->cset_links, cset_link) {
+	list_for_each_entry(link, &cgrp->cset_links, cset_link) {
 		struct css_set *cset = link->cset;
 		struct task_struct *task;
 		int count = 0;

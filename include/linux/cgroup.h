@@ -385,61 +385,118 @@ struct cgroup_map_cb {
 	for ((pos) = css_next_child(NULL, (parent)); (pos);		\
 	     (pos) = css_next_child((pos), (parent)))
 
-/**
- * css_for_each_descendant_pre - pre-order walk of a css's descendants
- * @pos: the css * to use as the loop cursor
- * @root: css whose descendants to walk
- *
- * Walk @root's descendants.  @root is included in the iteration and the
- * first node to be visited.  Must be called under rcu_read_lock().
- *
- * If a subsystem synchronizes ->css_online() and the start of iteration, a
- * css which finished ->css_online() is guaranteed to be visible in the
- * future iterations and will stay visible until the last reference is put.
- * A css which hasn't finished ->css_online() or already finished
- * ->css_offline() may show up during traversal.  It's each subsystem's
- * responsibility to synchronize against on/offlining.
- *
- * For example, the following guarantees that a descendant can't escape
- * state updates of its ancestors.
- *
- * my_online(@css)
- * {
- *	Lock @css's parent and @css;
- *	Inherit state from the parent;
- *	Unlock both.
- * }
- *
- * my_update_state(@css)
- * {
- *	css_for_each_descendant_pre(@pos, @css) {
- *		Lock @pos;
- *		if (@pos == @css)
- *			Update @css's state;
- *		else
- *			Verify @pos is alive and inherit state from its parent;
- *		Unlock @pos;
- *	}
- * }
- *
- * As long as the inheriting step, including checking the parent state, is
- * enclosed inside @pos locking, double-locking the parent isn't necessary
- * while inheriting.  The state update to the parent is guaranteed to be
- * visible by walking order and, as long as inheriting operations to the
- * same @pos are atomic to each other, multiple updates racing each other
- * still result in the correct state.  It's guaranateed that at least one
- * inheritance happens for any css after the latest update to its parent.
- *
- * If checking parent's state requires locking the parent, each inheriting
- * iteration should lock and unlock both @pos->parent and @pos.
- *
- * Alternatively, a subsystem may choose to use a single global lock to
- * synchronize ->css_online() and ->css_offline() against tree-walking
- * operations.
- *
- * It is allowed to temporarily drop RCU read lock during iteration.  The
- * caller is responsible for ensuring that @pos remains accessible until
- * the start of the next iteration by, for example, bumping the css refcnt.
+/* cftype->flags */
+#define CFTYPE_ONLY_ON_ROOT	(1U << 0)	/* only create on root cg */
+#define CFTYPE_NOT_ON_ROOT	(1U << 1)	/* don't create on root cg */
+#define CFTYPE_INSANE		(1U << 2)	/* don't create if sane_behavior */
+
+#define MAX_CFTYPE_NAME		64
+
+struct cftype {
+	/*
+	 * By convention, the name should begin with the name of the
+	 * subsystem, followed by a period.  Zero length string indicates
+	 * end of cftype array.
+	 */
+	char name[MAX_CFTYPE_NAME];
+	int private;
+	/*
+	 * If not 0, file mode is set to this value, otherwise it will
+	 * be figured out automatically
+	 */
+	umode_t mode;
+
+	/*
+	 * If non-zero, defines the maximum length of string that can
+	 * be passed to write_string; defaults to 64
+	 */
+	size_t max_write_len;
+
+	/* CFTYPE_* flags */
+	unsigned int flags;
+
+	int (*open)(struct inode *inode, struct file *file);
+	ssize_t (*read)(struct cgroup *cgrp, struct cftype *cft,
+			struct file *file,
+			char __user *buf, size_t nbytes, loff_t *ppos);
+	/*
+	 * read_u64() is a shortcut for the common case of returning a
+	 * single integer. Use it in place of read()
+	 */
+	u64 (*read_u64)(struct cgroup *cgrp, struct cftype *cft);
+	/*
+	 * read_s64() is a signed version of read_u64()
+	 */
+	s64 (*read_s64)(struct cgroup *cgrp, struct cftype *cft);
+	/*
+	 * read_map() is used for defining a map of key/value
+	 * pairs. It should call cb->fill(cb, key, value) for each
+	 * entry. The key/value pairs (and their ordering) should not
+	 * change between reboots.
+	 */
+	int (*read_map)(struct cgroup *cgrp, struct cftype *cft,
+			struct cgroup_map_cb *cb);
+	/*
+	 * read_seq_string() is used for outputting a simple sequence
+	 * using seqfile.
+	 */
+	int (*read_seq_string)(struct cgroup *cgrp, struct cftype *cft,
+			       struct seq_file *m);
+
+	ssize_t (*write)(struct cgroup *cgrp, struct cftype *cft,
+			 struct file *file,
+			 const char __user *buf, size_t nbytes, loff_t *ppos);
+
+	/*
+	 * write_u64() is a shortcut for the common case of accepting
+	 * a single integer (as parsed by simple_strtoull) from
+	 * userspace. Use in place of write(); return 0 or error.
+	 */
+	int (*write_u64)(struct cgroup *cgrp, struct cftype *cft, u64 val);
+	/*
+	 * write_s64() is a signed version of write_u64()
+	 */
+	int (*write_s64)(struct cgroup *cgrp, struct cftype *cft, s64 val);
+
+	/*
+	 * write_string() is passed a nul-terminated kernelspace
+	 * buffer of maximum length determined by max_write_len.
+	 * Returns 0 or -ve error code.
+	 */
+	int (*write_string)(struct cgroup *cgrp, struct cftype *cft,
+			    const char *buffer);
+	/*
+	 * trigger() callback can be used to get some kick from the
+	 * userspace, when the actual string written is not important
+	 * at all. The private field can be used to determine the
+	 * kick type for multiplexing.
+	 */
+	int (*trigger)(struct cgroup *cgrp, unsigned int event);
+
+	int (*release)(struct inode *inode, struct file *file);
+
+	/*
+	 * register_event() callback will be used to add new userspace
+	 * waiter for changes related to the cftype. Implement it if
+	 * you want to provide this functionality. Use eventfd_signal()
+	 * on eventfd to send notification to userspace.
+	 */
+	int (*register_event)(struct cgroup *cgrp, struct cftype *cft,
+			struct eventfd_ctx *eventfd, const char *args);
+	/*
+	 * unregister_event() callback will be called when userspace
+	 * closes the eventfd or on cgroup removing.
+	 * This callback must be implemented, if you want provide
+	 * notification functionality.
+	 */
+	void (*unregister_event)(struct cgroup *cgrp, struct cftype *cft,
+			struct eventfd_ctx *eventfd);
+};
+
+/*
+ * cftype_sets describe cftypes belonging to a subsystem and are chained at
+ * cgroup_subsys->cftsets.  Each cftset points to an array of cftypes
+ * terminated by zero length name.
  */
 #define css_for_each_descendant_pre(pos, css)				\
 	for ((pos) = css_next_descendant_pre(NULL, (css)); (pos);	\
