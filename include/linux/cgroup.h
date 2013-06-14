@@ -14,16 +14,7 @@
 #include <linux/rculist.h>
 #include <linux/cgroupstats.h>
 #include <linux/fs.h>
-#include <linux/seq_file.h>
-#include <linux/kernfs.h>
-#include <linux/jump_label.h>
-#include <linux/nsproxy.h>
-#include <linux/types.h>
-#include <linux/ns_common.h>
-#include <linux/nsproxy.h>
-#include <linux/user_namespace.h>
-
-#include <linux/cgroup-defs.h>
+#include <linux/percpu-refcount.h>
 
 #ifdef CONFIG_CGROUPS
 
@@ -65,19 +56,8 @@ extern struct css_set init_css_set;
 #include <linux/cgroup_subsys.h>
 #undef SUBSYS
 
-/**
- * cgroup_subsys_enabled - fast test on whether a subsys is enabled
- * @ss: subsystem in question
- */
-#define cgroup_subsys_enabled(ss)						\
-	static_branch_likely(&ss ## _enabled_key)
-
-/**
- * cgroup_subsys_on_dfl - fast test on whether a subsys is on default hierarchy
- * @ss: subsystem in question
- */
-#define cgroup_subsys_on_dfl(ss)						\
-	static_branch_likely(&ss ## _on_dfl_key)
+	/* reference count - access via css_[try]get() and css_put() */
+	struct percpu_ref refcnt;
 
 bool css_has_online_children(struct cgroup_subsys_state *css);
 struct cgroup_subsys_state *css_from_id(int id, struct cgroup_subsys *ss);
@@ -102,10 +82,8 @@ static inline void css_get(struct cgroup_subsys_state *css)
 {
 	/* We don't need to reference count the root state */
 	if (!(css->flags & CSS_ROOT))
-		atomic_inc(&css->refcnt);
+		percpu_ref_get(&css->refcnt);
 }
-
-extern bool __css_tryget(struct cgroup_subsys_state *css);
 
 /**
  * css_tryget - try to obtain a reference on the specified css
@@ -121,10 +99,8 @@ static inline bool css_tryget(struct cgroup_subsys_state *css)
 {
 	if (css->flags & CSS_ROOT)
 		return true;
-	return __css_tryget(css);
+	return percpu_ref_tryget(&css->refcnt);
 }
-
-extern void __css_put(struct cgroup_subsys_state *css);
 
 /**
  * css_put - put a css reference
@@ -135,7 +111,7 @@ extern void __css_put(struct cgroup_subsys_state *css);
 static inline void css_put(struct cgroup_subsys_state *css)
 {
 	if (!(css->flags & CSS_ROOT))
-		__css_put(css);
+		percpu_ref_put(&css->refcnt);
 }
 
 /* bits in struct cgroup flags field */
@@ -229,9 +205,10 @@ struct cgroup {
 	struct list_head pidlists;
 	struct mutex pidlist_mutex;
 
-	/* For RCU-protected deletion */
+	/* For css percpu_ref killing and RCU-protected deletion */
 	struct rcu_head rcu_head;
 	struct work_struct destroy_work;
+	atomic_t css_kill_cnt;
 
 	/* List of events which userspace want to receive */
 	struct list_head event_list;

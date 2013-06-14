@@ -64,20 +64,6 @@
 #include <linux/file.h>
 #include <net/sock.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/cgroup.h>
-
-/*
- * pidlists linger the following amount before being destroyed.  The goal
- * is avoiding frequent destruction in the middle of consecutive read calls
- * Expiring in the middle is a performance problem not a correctness one.
- * 1 sec should be enough.
- */
-#define CGROUP_PIDLIST_DESTROY_DELAY	HZ
-
-#define CGROUP_FILE_NAME_MAX		(MAX_CGROUP_TYPE_NAMELEN +	\
-					 MAX_CFTYPE_NAME + 2)
-
 /*
  * cgroup_mutex is the master lock.  Any modification to cgroup or its
  * hierarchy must be performed while holding it.
@@ -217,25 +203,6 @@ static void kill_css(struct cgroup_subsys_state *css);
 static int cgroup_addrm_files(struct cgroup_subsys_state *css,
 			      struct cgroup *cgrp, struct cftype cfts[],
 			      bool is_add);
-
-static bool cgroup_ssid_no_v1(int ssid)
-{
-	return cgroup_no_v1_mask & (1 << ssid);
-}
-
-/* IDR wrappers which synchronize using cgroup_idr_lock */
-static int cgroup_idr_alloc(struct idr *idr, void *ptr, int start, int end,
-			    gfp_t gfp_mask)
-{
-	int ret;
-
-	idr_preload(gfp_mask);
-	spin_lock_bh(&cgroup_idr_lock);
-	ret = idr_alloc(idr, ptr, start, end, gfp_mask & ~__GFP_WAIT);
-	spin_unlock_bh(&cgroup_idr_lock);
-	idr_preload_end();
-	return ret;
-}
 
 /* convenient tests for these bits */
 static inline bool cgroup_is_dead(const struct cgroup *cgrp)
@@ -5592,7 +5559,17 @@ static void css_dput_fn(struct work_struct *work)
 	}
 }
 
-static void css_free_rcu_fn(struct rcu_head *rcu_head)
+static void css_release(struct percpu_ref *ref)
+{
+	struct cgroup_subsys_state *css =
+		container_of(ref, struct cgroup_subsys_state, refcnt);
+
+	schedule_work(&css->dput_work);
+}
+
+static void init_cgroup_css(struct cgroup_subsys_state *css,
+			       struct cgroup_subsys *ss,
+			       struct cgroup *cgrp)
 {
 	struct cgroup_subsys_state *css =
 		container_of(rcu_head, struct cgroup_subsys_state, rcu_head);
@@ -5662,11 +5639,12 @@ static void init_and_link_css(struct cgroup_subsys_state *css,
 
 	memset(css, 0, sizeof(*css));
 	css->cgroup = cgrp;
-	css->ss = ss;
-	INIT_LIST_HEAD(&css->sibling);
-	INIT_LIST_HEAD(&css->children);
-	css->serial_nr = css_serial_nr_next++;
-	atomic_set(&css->online_cnt, 0);
+	css->flags = 0;
+	css->id = NULL;
+	if (cgrp == dummytop)
+		css->flags |= CSS_ROOT;
+	BUG_ON(cgrp->subsys[ss->subsys_id]);
+	cgrp->subsys[ss->subsys_id] = css;
 
 	if (cgroup_parent(cgrp)) {
 		css->parent = cgroup_css(cgroup_parent(cgrp), ss);
@@ -5836,7 +5814,37 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 	if (test_bit(CGRP_CPUSET_CLONE_CHILDREN, &parent->flags))
 		set_bit(CGRP_CPUSET_CLONE_CHILDREN, &cgrp->flags);
 
-	cgrp->self.serial_nr = css_serial_nr_next++;
+	for_each_subsys(root, ss) {
+		struct cgroup_subsys_state *css;
+
+		css = ss->css_alloc(cgrp);
+		if (IS_ERR(css)) {
+			err = PTR_ERR(css);
+			goto err_free_all;
+		}
+
+		err = percpu_ref_init(&css->refcnt, css_release);
+		if (err)
+			goto err_free_all;
+
+		init_cgroup_css(css, ss, cgrp);
+
+		if (ss->use_id) {
+			err = alloc_css_id(ss, parent, cgrp);
+			if (err)
+				goto err_free_all;
+		}
+	}
+
+	/*
+	 * Create directory.  cgroup_create_file() returns with the new
+	 * directory locked on success so that it can be populated without
+	 * dropping cgroup_mutex.
+	 */
+	err = cgroup_create_file(dentry, S_IFDIR | mode, sb);
+	if (err < 0)
+		goto err_free_all;
+	lockdep_assert_held(&dentry->d_inode->i_mutex);
 
 	/*
 	 * Assign a monotonically increasing serial number.  With the list
@@ -5870,9 +5878,28 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 
 	return cgrp;
 
-out_cancel_ref:
-	percpu_ref_exit(&cgrp->self.refcnt);
-out_free_cgrp:
+	mutex_unlock(&cgroup_mutex);
+	mutex_unlock(&cgrp->dentry->d_inode->i_mutex);
+
+	return 0;
+
+err_free_all:
+	for_each_subsys(root, ss) {
+		struct cgroup_subsys_state *css = cgrp->subsys[ss->subsys_id];
+
+		if (css) {
+			percpu_ref_cancel_init(&css->refcnt);
+			ss->css_free(cgrp);
+		}
+	}
+	mutex_unlock(&cgroup_mutex);
+	/* Release the reference count that we took on the superblock */
+	deactivate_super(sb);
+err_free_id:
+	ida_simple_remove(&root->cgroup_ida, cgrp->id);
+err_free_name:
+	kfree(rcu_dereference_raw(cgrp->name));
+err_free_cgrp:
 	kfree(cgrp);
 	return ERR_PTR(ret);
 }
@@ -5885,6 +5912,48 @@ static int cgroup_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	return cgroup_create(c_parent, dentry, mode | S_IFDIR);
 }
 
+static void cgroup_css_killed(struct cgroup *cgrp)
+{
+	if (!atomic_dec_and_test(&cgrp->css_kill_cnt))
+		return;
+
+	/* percpu ref's of all css's are killed, kick off the next step */
+	INIT_WORK(&cgrp->destroy_work, cgroup_offline_fn);
+	schedule_work(&cgrp->destroy_work);
+}
+
+static void css_ref_killed_fn(struct percpu_ref *ref)
+{
+	struct cgroup_subsys_state *css =
+		container_of(ref, struct cgroup_subsys_state, refcnt);
+
+	cgroup_css_killed(css->cgroup);
+}
+
+/**
+ * cgroup_destroy_locked - the first stage of cgroup destruction
+ * @cgrp: cgroup to be destroyed
+ *
+ * css's make use of percpu refcnts whose killing latency shouldn't be
+ * exposed to userland and are RCU protected.  Also, cgroup core needs to
+ * guarantee that css_tryget() won't succeed by the time ->css_offline() is
+ * invoked.  To satisfy all the requirements, destruction is implemented in
+ * the following two steps.
+ *
+ * s1. Verify @cgrp can be destroyed and mark it dying.  Remove all
+ *     userland visible parts and start killing the percpu refcnts of
+ *     css's.  Set up so that the next stage will be kicked off once all
+ *     the percpu refcnts are confirmed to be killed.
+ *
+ * s2. Invoke ->css_offline(), mark the cgroup dead and proceed with the
+ *     rest of destruction.  Once all cgroup references are gone, the
+ *     cgroup is RCU-freed.
+ *
+ * This function implements s1.  After this step, @cgrp is gone as far as
+ * the userland is concerned and a new cgroup with the same name may be
+ * created.  As cgroup doesn't care about the names internally, this
+ * doesn't cause any problem.
+ */
 static int cgroup_destroy_locked(struct cgroup *cgrp)
 	__releases(&cgroup_mutex) __acquires(&cgroup_mutex)
 {
@@ -5907,16 +5976,34 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 		return -EBUSY;
 
 	/*
-	 * Block new css_tryget() by deactivating refcnt and mark @cgrp
-	 * removed.  This makes future css_tryget() attempts fail which we
-	 * guarantee to ->css_offline() callbacks.
+	 * Block new css_tryget() by killing css refcnts.  cgroup core
+	 * guarantees that, by the time ->css_offline() is invoked, no new
+	 * css reference will be given out via css_tryget().  We can't
+	 * simply call percpu_ref_kill() and proceed to offlining css's
+	 * because percpu_ref_kill() doesn't guarantee that the ref is seen
+	 * as killed on all CPUs on return.
+	 *
+	 * Use percpu_ref_kill_and_confirm() to get notifications as each
+	 * css is confirmed to be seen as killed on all CPUs.  The
+	 * notification callback keeps track of the number of css's to be
+	 * killed and schedules cgroup_offline_fn() to perform the rest of
+	 * destruction once the percpu refs of all css's are confirmed to
+	 * be killed.
 	 */
+	atomic_set(&cgrp->css_kill_cnt, 1);
 	for_each_subsys(cgrp->root, ss) {
 		struct cgroup_subsys_state *css = cgrp->subsys[ss->subsys_id];
 
-		WARN_ON(atomic_read(&css->refcnt) < 0);
-		atomic_add(CSS_DEACT_BIAS, &css->refcnt);
+		/*
+		 * Killing would put the base ref, but we need to keep it
+		 * alive until after ->css_offline.
+		 */
+		percpu_ref_get(&css->refcnt);
+
+		atomic_inc(&cgrp->css_kill_cnt);
+		percpu_ref_kill_and_confirm(&css->refcnt, css_ref_killed_fn);
 	}
+	cgroup_css_killed(cgrp);
 
 	/*
 	 * Mark @cgrp dead.  This prevents further task migration and child
@@ -5952,12 +6039,19 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	}
 	spin_unlock(&cgrp->event_list_lock);
 
-	INIT_WORK(&cgrp->destroy_work, cgroup_offline_fn);
-	schedule_work(&cgrp->destroy_work);
-
 	return 0;
 };
 
+/**
+ * cgroup_offline_fn - the second step of cgroup destruction
+ * @work: cgroup->destroy_free_work
+ *
+ * This function is invoked from a work item for a cgroup which is being
+ * destroyed after the percpu refcnts of all css's are guaranteed to be
+ * seen as killed on all CPUs, and performs the rest of destruction.  This
+ * is the second step of destruction described in the comment above
+ * cgroup_destroy_locked().
+ */
 static void cgroup_offline_fn(struct work_struct *work)
 {
 	struct cgroup *cgrp = container_of(work, struct cgroup, destroy_work);
@@ -5967,16 +6061,19 @@ static void cgroup_offline_fn(struct work_struct *work)
 
 	mutex_lock(&cgroup_mutex);
 
-	/* tell subsystems to initate destruction */
+	/*
+	 * css_tryget() is guaranteed to fail now.  Tell subsystems to
+	 * initate destruction.
+	 */
 	for_each_subsys(cgrp->root, ss)
 		offline_css(ss, cgrp);
 
 	/*
-	 * Put all the base refs.  Each css holds an extra reference to the
-	 * cgroup's dentry and cgroup removal proceeds regardless of css
-	 * refs.  On the last put of each css, whenever that may be, the
-	 * extra dentry ref is put so that dentry destruction happens only
-	 * after all css's are released.
+	 * Put the css refs from cgroup_destroy_locked().  Each css holds
+	 * an extra reference to the cgroup's dentry and cgroup removal
+	 * proceeds regardless of css refs.  On the last put of each css,
+	 * whenever that may be, the extra dentry ref is put so that dentry
+	 * destruction happens only after all css's are released.
 	 */
 	for_each_subsys(cgrp->root, ss)
 		css_put(cgrp->subsys[ss->subsys_id]);
@@ -6754,34 +6851,6 @@ static void check_for_release(struct cgroup *cgrp)
 	}
 }
 
-/* Caller must verify that the css is not for root cgroup */
-bool __css_tryget(struct cgroup_subsys_state *css)
-{
-	while (true) {
-		int t, v;
-
-		v = css_refcnt(css);
-		t = atomic_cmpxchg(&css->refcnt, v, v + 1);
-		if (likely(t == v))
-			return true;
-		else if (t < 0)
-			return false;
-		cpu_relax();
-	}
-}
-EXPORT_SYMBOL_GPL(__css_tryget);
-
-/* Caller must verify that the css is not for root cgroup */
-void __css_put(struct cgroup_subsys_state *css)
-{
-	int v;
-
-	v = css_unbias_refcnt(atomic_dec_return(&css->refcnt));
-	if (v == 0)
-		schedule_work(&css->dput_work);
-}
-EXPORT_SYMBOL_GPL(__css_put);
-
 /*
  * Notify userspace when a cgroup is released, by running the
  * configured release agent with the name of the cgroup (path
@@ -6882,9 +6951,12 @@ unsigned short css_id(struct cgroup_subsys_state *css)
 	char *token;
 	int i;
 
-	while ((token = strsep(&str, ",")) != NULL) {
-		if (!*token)
-			continue;
+	/*
+	 * This css_id() can return correct value when somone has refcnt
+	 * on this or this is under rcu_read_lock(). Once css->id is allocated,
+	 * it's unchanged until freed.
+	 */
+	cssid = rcu_dereference_raw(css->id);
 
 		if (!strcmp(token, "all")) {
 			cgroup_no_v1_mask = U16_MAX;
