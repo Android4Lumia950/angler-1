@@ -1610,7 +1610,8 @@ static int cgroup_remount(struct kernfs_root *kf_root, int *flags, char *data)
 	if (ret)
 		goto out_unlock;
 
-	if (opts.subsys_mask != root->subsys_mask || opts.release_agent)
+	if (opts.subsys_mask != root->subsys_mas
+		__setup || opts.release_agent)
 		pr_warn("option changes via remount are deprecated (pid=%d comm=%s)\n",
 			task_tgid_nr(current), current->comm);
 
@@ -1717,7 +1718,6 @@ static void init_cgroup_housekeeping(struct cgroup *cgrp)
 	INIT_LIST_HEAD(&cgrp->children);
 	INIT_LIST_HEAD(&cgrp->files);
 	INIT_LIST_HEAD(&cgrp->cset_links);
-	INIT_LIST_HEAD(&cgrp->allcg_node);
 	INIT_LIST_HEAD(&cgrp->release_list);
 	INIT_LIST_HEAD(&cgrp->pidlists);
 	mutex_init(&cgrp->pidlist_mutex);
@@ -1737,10 +1737,10 @@ static void init_cgroup_root(struct cgroup_root *root,
 	struct cgroup *cgrp = &root->cgrp;
 
 	INIT_LIST_HEAD(&root->root_list);
-	atomic_set(&root->nr_cgrps, 1);
+	root->number_of_cgroups = 1;
 	cgrp->root = root;
 	init_cgroup_housekeeping(cgrp);
-	idr_init(&root->cgroup_idr);
+}
 
 static int cgroup_init_root_id(struct cgroupfs_root *root)
 {
@@ -4087,137 +4087,78 @@ restart:
 	return ret;
 }
 
-static int cgroup_apply_cftypes(struct cftype *cfts, bool is_add)
+static void cgroup_cfts_prepare(void)
+	__acquires(&cgroup_mutex)
+{
+	/*
+	 * Thanks to the entanglement with vfs inode locking, we can't walk
+	 * the existing cgroups under cgroup_mutex and create files.
+	 * Instead, we use cgroup_for_each_descendant_pre() and drop RCU
+	 * read lock before calling cgroup_addrm_files().
+	 */
+	mutex_lock(&cgroup_mutex);
+}
+
+static void cgroup_cfts_commit(struct cgroup_subsys *ss,
+			       struct cftype *cfts, bool is_add)
+	__releases(&cgroup_mutex)
 {
 	LIST_HEAD(pending);
-	struct cgroup_subsys *ss = cfts[0].ss;
-	struct cgroup *root = &ss->root->cgrp;
-	struct cgroup_subsys_state *css;
-	int ret = 0;
+	struct cgroup *cgrp, *root = &ss->root->top_cgroup;
+	struct super_block *sb = ss->root->sb;
+	struct dentry *prev = NULL;
+	struct inode *inode;
+	u64 update_upto;
 
-	lockdep_assert_held(&cgroup_mutex);
-
-	/* add/rm files for all cgroups created before */
-	css_for_each_descendant_pre(css, cgroup_css(root, ss)) {
-		struct cgroup *cgrp = css->cgroup;
-
-		if (!(css->flags & CSS_VISIBLE))
-			continue;
-
-		ret = cgroup_addrm_files(css, cgrp, cfts, is_add);
-		if (ret)
-			break;
+	/* %NULL @cfts indicates abort and don't bother if @ss isn't attached */
+	if (!cfts || ss->root == &rootnode ||
+	    !atomic_inc_not_zero(&sb->s_active)) {
+		mutex_unlock(&cgroup_mutex);
+		return;
 	}
-
-	if (is_add && !ret)
-		kernfs_activate(root->kn);
-	return ret;
-}
-
-static void cgroup_exit_cftypes(struct cftype *cfts)
-{
-	struct cftype *cft;
-
-	for (cft = cfts; cft->name[0] != '\0'; cft++) {
-		/* free copy for custom atomic_write_len, see init_cftypes() */
-		if (cft->max_write_len && cft->max_write_len != PAGE_SIZE)
-			kfree(cft->kf_ops);
-		cft->kf_ops = NULL;
-		cft->ss = NULL;
-
-		/* revert flags set by cgroup core while adding @cfts */
-		cft->flags &= ~(__CFTYPE_ONLY_ON_DFL | __CFTYPE_NOT_ON_DFL);
-	}
-}
-
-static int cgroup_init_cftypes(struct cgroup_subsys *ss, struct cftype *cfts)
-{
-	struct cftype *cft;
-
-	for (cft = cfts; cft->name[0] != '\0'; cft++) {
-		struct kernfs_ops *kf_ops;
-
-		WARN_ON(cft->ss || cft->kf_ops);
-
-		if (cft->seq_start)
-			kf_ops = &cgroup_kf_ops;
-		else
-			kf_ops = &cgroup_kf_single_ops;
-
-		/*
-		 * Ugh... if @cft wants a custom max_write_len, we need to
-		 * make a copy of kf_ops to set its atomic_write_len.
-		 */
-		if (cft->max_write_len && cft->max_write_len != PAGE_SIZE) {
-			kf_ops = kmemdup(kf_ops, sizeof(*kf_ops), GFP_KERNEL);
-			if (!kf_ops) {
-				cgroup_exit_cftypes(cfts);
-				return -ENOMEM;
-			}
-			kf_ops->atomic_write_len = cft->max_write_len;
-		}
-
-		cft->kf_ops = kf_ops;
-		cft->ss = ss;
-	}
-
-	return 0;
-}
-
-static int cgroup_rm_cftypes_locked(struct cftype *cfts)
-{
-	lockdep_assert_held(&cgroup_mutex);
-
-	if (!cfts || !cfts[0].ss)
-		return -ENOENT;
-
-	list_del(&cfts->node);
-	cgroup_apply_cftypes(cfts, false);
-	cgroup_exit_cftypes(cfts);
-	return 0;
-}
-
-/**
- * cgroup_rm_cftypes - remove an array of cftypes from a subsystem
- * @cfts: zero-length name terminated array of cftypes
- *
- * Unregister @cfts.  Files described by @cfts are removed from all
- * existing cgroups and all future cgroups won't have them either.  This
- * function can be called anytime whether @cfts' subsys is attached or not.
- *
- * Returns 0 on successful unregistration, -ENOENT if @cfts is not
- * registered.
- */
-int cgroup_rm_cftypes(struct cftype *cfts)
-{
-	int ret;
-
-	mutex_lock(&cgroup_mutex);
-	ret = cgroup_rm_cftypes_locked(cfts);
-	mutex_unlock(&cgroup_mutex);
 
 	/*
-	 * All new cgroups will see @cfts update on @ss->cftsets.  Add/rm
-	 * files for all cgroups which were created before.
+	 * All cgroups which are created after we drop cgroup_mutex will
+	 * have the updated set of files, so we only need to update the
+	 * cgroups created before the current @cgroup_serial_nr_cursor.
 	 */
-	list_for_each_entry_safe(cgrp, n, &pending, cft_q_node) {
-		struct inode *inode = cgrp->dentry->d_inode;
+	update_upto = atomic64_read(&cgroup_serial_nr_cursor);
+
+	mutex_unlock(&cgroup_mutex);
+
+	/* @root always needs to be updated */
+	inode = root->dentry->d_inode;
+	mutex_lock(&inode->i_mutex);
+	mutex_lock(&cgroup_mutex);
+	cgroup_addrm_files(root, ss, cfts, is_add);
+	mutex_unlock(&cgroup_mutex);
+	mutex_unlock(&inode->i_mutex);
+
+	/* add/rm files for all cgroups created before */
+	rcu_read_lock();
+	cgroup_for_each_descendant_pre(cgrp, root) {
+		if (cgroup_is_dead(cgrp))
+			continue;
+
+		inode = cgrp->dentry->d_inode;
+		dget(cgrp->dentry);
+		rcu_read_unlock();
+
+		dput(prev);
+		prev = cgrp->dentry;
 
 		mutex_lock(&inode->i_mutex);
 		mutex_lock(&cgroup_mutex);
-		if (!cgroup_is_dead(cgrp))
+		if (cgrp->serial_nr <= update_upto && !cgroup_is_dead(cgrp))
 			cgroup_addrm_files(cgrp, ss, cfts, is_add);
 		mutex_unlock(&cgroup_mutex);
 		mutex_unlock(&inode->i_mutex);
 
-		list_del_init(&cgrp->cft_q_node);
-		dput(cgrp->dentry);
+		rcu_read_lock();
 	}
-
-	if (sb)
-		deactivate_super(sb);
-
-	mutex_unlock(&cgroup_cft_mutex);
+	rcu_read_unlock();
+	dput(prev);
+	deactivate_super(sb);
 }
 
 /**
@@ -5857,9 +5798,8 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 	cgrp->serial_nr = atomic64_inc_return(&cgroup_serial_nr_cursor);
 
 	/* allocation complete, commit to creation */
-	list_add_tail_rcu(&cgrp->self.sibling, &cgroup_parent(cgrp)->self.children);
-	atomic_inc(&root->nr_cgrps);
-	cgroup_get(parent);
+	list_add_tail_rcu(&cgrp->sibling, &cgrp->parent->children);
+	root->number_of_cgroups++;
 
 	/*
 	 * @cgrp is now fully operational.  If something fails after this
@@ -6082,7 +6022,6 @@ static void cgroup_offline_fn(struct work_struct *work)
 
 	/* delete this cgroup from parent->children */
 	list_del_rcu(&cgrp->sibling);
-	list_del_init(&cgrp->allcg_node);
 
 	dput(d);
 
