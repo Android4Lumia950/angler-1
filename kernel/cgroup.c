@@ -185,12 +185,24 @@ static int cgroup_root_count;
  */
 static DEFINE_IDR(cgroup_hierarchy_idr);
 
+/* dummytop is a shorthand for the dummy hierarchy's top cgroup */
+#define dummytop (&rootnode.top_cgroup)
+
+static struct cgroup_name root_cgroup_name = { .name = "/" };
+
 /*
- * Assign a monotonically increasing serial number to csses.  It guarantees
- * cgroups with bigger numbers are newer than those with smaller numbers.
- * Also, as csses are always appended to the parent's ->children list, it
- * guarantees that sibling csses are always sorted in the ascending serial
- * number order on the list.  Protected by cgroup_mutex.
+ * Assign a monotonically increasing serial number to cgroups.  It
+ * guarantees cgroups with bigger numbers are newer than those with smaller
+ * numbers.  Also, as cgroups are always appended to the parent's
+ * ->children list, it guarantees that sibling cgroups are always sorted in
+ * the ascending serial number order on the list.
+ */
+static atomic64_t cgroup_serial_nr_cursor = ATOMIC64_INIT(0);
+
+/* This flag indicates whether tasks in the fork and exit paths should
+ * check for fork/exit handlers to call. This avoids us having to do
+ * extra work in the fork/exit path if none of the subsystems need to
+ * be called.
  */
 static u64 css_serial_nr_next = 1;
 
@@ -5763,7 +5775,6 @@ err_free_css:
  */
 static struct cgroup *cgroup_create(struct cgroup *parent)
 {
-	static atomic64_t serial_nr_cursor = ATOMIC64_INIT(0);
 	struct cgroup *cgrp;
 	struct cgroup_name *name;
 	struct cgroupfs_root *root = parent->root;
@@ -5843,13 +5854,7 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 		goto err_free_all;
 	lockdep_assert_held(&dentry->d_inode->i_mutex);
 
-	/*
-	 * Assign a monotonically increasing serial number.  With the list
-	 * appending below, it guarantees that sibling cgroups are always
-	 * sorted in the ascending serial number order on the parent's
-	 * ->children.
-	 */
-	cgrp->serial_nr = atomic64_inc_return(&serial_nr_cursor);
+	cgrp->serial_nr = atomic64_inc_return(&cgroup_serial_nr_cursor);
 
 	/* allocation complete, commit to creation */
 	list_add_tail_rcu(&cgrp->self.sibling, &cgroup_parent(cgrp)->self.children);
