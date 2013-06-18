@@ -4264,17 +4264,14 @@ int cgroup_add_dfl_cftypes(struct cgroup_subsys *ss, struct cftype *cfts)
 	return cgroup_add_cftypes(ss, cfts);
 }
 
-/**
- * cgroup_add_legacy_cftypes - add an array of cftypes for legacy hierarchies
- * @ss: target cgroup subsystem
- * @cfts: zero-length name terminated array of cftypes
- *
- * Similar to cgroup_add_cftypes() but the added files are only used for
- * the legacy hierarchies.
- */
-int cgroup_add_legacy_cftypes(struct cgroup_subsys *ss, struct cftype *cfts)
-{
-	struct cftype *cft;
+	list_for_each_entry(set, &ss->cftsets, node) {
+		if (set->cfts == cfts) {
+			list_del(&set->node);
+			kfree(set);
+			cgroup_cfts_commit(ss, cfts, false);
+			return 0;
+		}
+	}
 
 	for (cft = cfts; cft && cft->name[0] != '\0'; cft++)
 		cft->flags |= __CFTYPE_NOT_ON_DFL;
