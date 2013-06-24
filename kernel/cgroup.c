@@ -113,19 +113,33 @@ struct percpu_rw_semaphore cgroup_threadgroup_rwsem;
  * registered after that. The mutable section of this array is protected by
  * cgroup_mutex.
  */
-static struct workqueue_struct *cgroup_pidlist_destroy_wq;
-
-/* generate an array of cgroup subsystem pointers */
-#define SUBSYS(_x) [_x ## _cgrp_id] = &_x ## _cgrp_subsys,
-static struct cgroup_subsys *cgroup_subsys[] = {
+#define SUBSYS(_x) [_x ## _subsys_id] = &_x ## _subsys,
+#define IS_SUBSYS_ENABLED(option) IS_BUILTIN(option)
+static struct cgroup_subsys *cgroup_subsys[CGROUP_SUBSYS_COUNT] = {
 #include <linux/cgroup_subsys.h>
 };
 #undef SUBSYS
 
-/* array of cgroup subsystem names */
-#define SUBSYS(_x) [_x ## _cgrp_id] = #_x,
-static const char *cgroup_subsys_name[] = {
-#include <linux/cgroup_subsys.h>
+/*
+ * The dummy hierarchy, reserved for the subsystems that are otherwise
+ * unattached - it never has more than a single cgroup, and all tasks are
+ * part of that cgroup.
+ */
+static struct cgroupfs_root cgroup_dummy_root;
+
+/* dummy_top is a shorthand for the dummy hierarchy's top cgroup */
+static struct cgroup * const cgroup_dummy_top = &cgroup_dummy_root.top_cgroup;
+
+/*
+ * cgroupfs file entry, pointed to from leaf dentry->d_fsdata.
+ */
+struct cfent {
+	struct list_head		node;
+	struct dentry			*dentry;
+	struct cftype			*type;
+
+	/* file xattrs */
+	struct simple_xattrs		xattrs;
 };
 #undef SUBSYS
 
@@ -184,9 +198,6 @@ static int cgroup_root_count;
  * writes, either for reads.
  */
 static DEFINE_IDR(cgroup_hierarchy_idr);
-
-/* dummytop is a shorthand for the dummy hierarchy's top cgroup */
-#define dummytop (&rootnode.top_cgroup)
 
 static struct cgroup_name root_cgroup_name = { .name = "/" };
 
@@ -343,12 +354,27 @@ static int notify_on_release(const struct cgroup *cgrp)
  *
  * Should be called under cgroup_[tree_]mutex.
  */
-#define for_each_css(css, ssid, cgrp)					\
-	for ((ssid) = 0; (ssid) < CGROUP_SUBSYS_COUNT; (ssid)++)	\
-		if (!((css) = rcu_dereference_check(			\
-				(cgrp)->subsys[(ssid)],			\
-				lockdep_is_held(&cgroup_mutex)))) { }	\
-		else
+#define for_each_subsys(_root, _ss) \
+list_for_each_entry(_ss, &_root->subsys_list, sibling)
+
+/* for_each_active_root() allows you to iterate across the active hierarchies */
+#define for_each_active_root(_root) \
+list_for_each_entry(_root, &cgroup_roots, root_list)
+
+static inline struct cgroup *__d_cgrp(struct dentry *dentry)
+{
+	return dentry->d_fsdata;
+}
+
+static inline struct cfent *__d_cfe(struct dentry *dentry)
+{
+	return dentry->d_fsdata;
+}
+
+static inline struct cftype *__d_cft(struct dentry *dentry)
+{
+	return __d_cfe(dentry)->type;
+}
 
 /**
  * for_each_e_css - iterate all effective css's of a cgroup
@@ -838,7 +864,7 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 		return NULL;
 
 	/* Allocate all the cgrp_cset_link objects that we'll need */
-	if (allocate_cgrp_cset_links(root_count, &tmp_links) < 0) {
+	if (allocate_cgrp_cset_links(cgroup_root_count, &tmp_links) < 0) {
 		kfree(cset);
 		return NULL;
 	}
@@ -1333,14 +1359,56 @@ static int rebind_subsystems(struct cgroup_root *dst_root, u16 ss_mask)
 
 	lockdep_assert_held(&cgroup_mutex);
 
-	do_each_subsys_mask(ss, ssid, ss_mask) {
+/*
+ * NOTE : the dentry must have been dget()'ed
+ */
+static void cgroup_d_remove_dir(struct dentry *dentry)
+{
+	struct dentry *parent;
+	struct cgroupfs_root *root = dentry->d_sb->s_fs_info;
+
+	cgroup_clear_directory(dentry, true, root->subsys_mask);
+
+	parent = dentry->d_parent;
+	spin_lock(&parent->d_lock);
+	spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+	list_del_init(&dentry->d_child);
+	spin_unlock(&dentry->d_lock);
+	spin_unlock(&parent->d_lock);
+	remove_dir(dentry);
+}
+
+/*
+ * Call with cgroup_mutex held. Drops reference counts on modules, including
+ * any duplicate ones that parse_cgroupfs_options took. If this function
+ * returns an error, no reference counts are touched.
+ */
+static int rebind_subsystems(struct cgroupfs_root *root,
+			      unsigned long final_subsys_mask)
+{
+	unsigned long added_mask, removed_mask;
+	struct cgroup *cgrp = &root->top_cgroup;
+	int i;
+
+	BUG_ON(!mutex_is_locked(&cgroup_mutex));
+	BUG_ON(!mutex_is_locked(&cgroup_root_mutex));
+
+	removed_mask = root->actual_subsys_mask & ~final_subsys_mask;
+	added_mask = final_subsys_mask & ~root->actual_subsys_mask;
+	/* Check that any added subsystems are currently free */
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		unsigned long bit = 1UL << i;
+		struct cgroup_subsys *ss = cgroup_subsys[i];
+		if (!(bit & added_mask))
+			continue;
 		/*
 		 * If @ss has non-root csses attached to it, can't move.
 		 * If @ss is an implicit controller, it is exempt from this
 		 * rule and can be stolen.
 		 */
-		if (css_next_child(NULL, cgroup_css(&ss->root->cgrp, ss)) &&
-		    !ss->implicit_on_dfl)
+		BUG_ON(ss == NULL);
+		if (ss->root != &cgroup_dummy_root) {
+			/* Subsystem isn't free */
 			return -EBUSY;
 
 		/* can't move between two non-dummy roots either */
@@ -1348,35 +1416,48 @@ static int rebind_subsystems(struct cgroup_root *dst_root, u16 ss_mask)
 			return -EBUSY;
 	} while_each_subsys_mask();
 
-	do_each_subsys_mask(ss, ssid, ss_mask) {
-		struct cgroup_root *src_root = ss->root;
-		struct cgroup *scgrp = &src_root->cgrp;
-		struct cgroup_subsys_state *css = cgroup_css(scgrp, ss);
-		struct css_set *cset;
-
-		WARN_ON(!css || cgroup_css(dcgrp, ss));
-
-		/* disable from the source */
-		src_root->subsys_mask &= ~(1 << ssid);
-		WARN_ON(cgroup_apply_control(scgrp));
-		cgroup_finalize_control(scgrp, 0);
-
-		/* rebind */
-		RCU_INIT_POINTER(scgrp->subsys[ssid], NULL);
-		rcu_assign_pointer(dcgrp->subsys[ssid], css);
-		ss->root = dst_root;
-		css->cgroup = dcgrp;
-
-		spin_lock_irq(&css_set_lock);
-		hash_for_each(css_set_table, i, cset, hlist)
-			list_move_tail(&cset->e_cset_node[ss->id],
-				       &dcgrp->e_csets[ss->id]);
-		spin_unlock_irq(&css_set_lock);
-
-		/* default hierarchy doesn't enable controllers by default */
-		dst_root->subsys_mask |= 1 << ssid;
-		if (dst_root == &cgrp_dfl_root) {
-			static_branch_enable(cgroup_subsys_on_dfl_key[ssid]);
+	/* Process each subsystem */
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		struct cgroup_subsys *ss = cgroup_subsys[i];
+		unsigned long bit = 1UL << i;
+		if (bit & added_mask) {
+			/* We're binding this subsystem to this hierarchy */
+			BUG_ON(ss == NULL);
+			BUG_ON(cgrp->subsys[i]);
+			BUG_ON(!cgroup_dummy_top->subsys[i]);
+			BUG_ON(cgroup_dummy_top->subsys[i]->cgroup != cgroup_dummy_top);
+			cgrp->subsys[i] = cgroup_dummy_top->subsys[i];
+			cgrp->subsys[i]->cgroup = cgrp;
+			list_move(&ss->sibling, &root->subsys_list);
+			ss->root = root;
+			if (ss->bind)
+				ss->bind(cgrp);
+			/* refcount was already taken, and we're keeping it */
+		} else if (bit & removed_mask) {
+			/* We're removing this subsystem */
+			BUG_ON(ss == NULL);
+			BUG_ON(cgrp->subsys[i] != cgroup_dummy_top->subsys[i]);
+			BUG_ON(cgrp->subsys[i]->cgroup != cgrp);
+			if (ss->bind)
+				ss->bind(cgroup_dummy_top);
+			cgroup_dummy_top->subsys[i]->cgroup = cgroup_dummy_top;
+			cgrp->subsys[i] = NULL;
+			cgroup_subsys[i]->root = &cgroup_dummy_root;
+			list_move(&ss->sibling, &cgroup_dummy_root.subsys_list);
+			/* subsystem is now free - drop reference on module */
+			module_put(ss->module);
+		} else if (bit & final_subsys_mask) {
+			/* Subsystem state should already exist */
+			BUG_ON(ss == NULL);
+			BUG_ON(!cgrp->subsys[i]);
+			/*
+			 * a refcount was taken, but we already had one, so
+			 * drop the extra reference.
+			 */
+			module_put(ss->module);
+#ifdef CONFIG_MODULE_UNLOAD
+			BUG_ON(ss->module && !module_refcount(ss->module));
+#endif
 		} else {
 			dcgrp->subtree_control |= 1 << ssid;
 			static_branch_disable(cgroup_subsys_on_dfl_key[ssid]);
@@ -1460,6 +1541,12 @@ struct cgroup_sb_opts {
 	bool none;
 };
 
+/*
+ * Convert a hierarchy specifier into a bitmask of subsystems and
+ * flags. Call with cgroup_mutex held to protect the cgroup_subsys[]
+ * array. This function takes refcounts on subsystems to be used, unless it
+ * returns error, in which case no refcounts are taken.
+ */
 static int parse_cgroupfs_options(char *data, struct cgroup_sb_opts *opts)
 {
 	char *token, *o = data;
@@ -1540,8 +1627,11 @@ static int parse_cgroupfs_options(char *data, struct cgroup_sb_opts *opts)
 			continue;
 		}
 
-		for_each_subsys(ss, i) {
-			if (strcmp(token, ss->legacy_name))
+		for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+			struct cgroup_subsys *ss = cgroup_subsys[i];
+			if (ss == NULL)
+				continue;
+			if (strcmp(token, ss->name))
 				continue;
 			if (ss->disabled)
 				continue;
@@ -1565,10 +1655,45 @@ static int parse_cgroupfs_options(char *data, struct cgroup_sb_opts *opts)
 	 * otherwise if 'none', 'name=' and a subsystem name options were
 	 * not specified, let's default to 'all'
 	 */
-	if (all_ss || (!one_ss && !opts->none && !opts->name))
-		for_each_subsys(ss, i)
-			if ((!ss->disabled) && !cgroup_ssid_no_v1(i))
-				opts->subsys_mask |= (1 << i);
+	if (all_ss || (!one_ss && !opts->none && !opts->name)) {
+		for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+			struct cgroup_subsys *ss = cgroup_subsys[i];
+			if (ss == NULL)
+				continue;
+			if (ss->disabled)
+				continue;
+			set_bit(i, &opts->subsys_mask);
+		}
+	}
+
+	/* Consistency checks */
+
+	if (opts->flags & CGRP_ROOT_SANE_BEHAVIOR) {
+		pr_warning("cgroup: sane_behavior: this is still under development and its behaviors will change, proceed at your own risk\n");
+
+		if (opts->flags & CGRP_ROOT_NOPREFIX) {
+			pr_err("cgroup: sane_behavior: noprefix is not allowed\n");
+			return -EINVAL;
+		}
+
+		if (opts->cpuset_clone_children) {
+			pr_err("cgroup: sane_behavior: clone_children is not allowed\n");
+			return -EINVAL;
+		}
+	}
+
+	/*
+	 * Option noprefix was introduced just for backward compatibility
+	 * with the old cpuset, so we allow noprefix only if mounting just
+	 * the cpuset subsystem.
+	 */
+	if ((opts->flags & CGRP_ROOT_NOPREFIX) && (opts->subsys_mask & mask))
+		return -EINVAL;
+
+
+	/* Can't specify "none" and some subsystems */
+	if (opts->subsys_mask && opts->none)
+		return -EINVAL;
 
 	/*
 	 * We either have to specify by name or by subsystems. (So all
@@ -1585,14 +1710,46 @@ static int parse_cgroupfs_options(char *data, struct cgroup_sb_opts *opts)
 	if ((opts->flags & CGRP_ROOT_NOPREFIX) && (opts->subsys_mask & mask))
 		return -EINVAL;
 
-	/* Can't specify "none" and some subsystems */
-	if (opts->subsys_mask && opts->none)
-		return -EINVAL;
+		if (!(bit & opts->subsys_mask))
+			continue;
+		if (!try_module_get(cgroup_subsys[i]->module)) {
+			module_pin_failed = true;
+			break;
+		}
+	}
+	if (module_pin_failed) {
+		/*
+		 * oops, one of the modules was going away. this means that we
+		 * raced with a module_delete call, and to the user this is
+		 * essentially a "subsystem doesn't exist" case.
+		 */
+		for (i--; i >= 0; i--) {
+			/* drop refcounts only on the ones we took */
+			unsigned long bit = 1UL << i;
+
+			if (!(bit & opts->subsys_mask))
+				continue;
+			module_put(cgroup_subsys[i]->module);
+		}
+		return -ENOENT;
+	}
 
 	return 0;
 }
 
-static int cgroup_remount(struct kernfs_root *kf_root, int *flags, char *data)
+static void drop_parsed_module_refcounts(unsigned long subsys_mask)
+{
+	int i;
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		unsigned long bit = 1UL << i;
+
+		if (!(bit & subsys_mask))
+			continue;
+		module_put(cgroup_subsys[i]->module);
+	}
+}
+
+static int cgroup_remount(struct super_block *sb, int *flags, char *data)
 {
 	int ret = 0;
 	struct cgroup_root *root = cgroup_root_from_kf(kf_root);
@@ -2055,8 +2212,8 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		/* EBUSY should be the only error here */
 		BUG_ON(ret);
 
-		list_add(&root->root_list, &roots);
-		root_count++;
+		list_add(&root->root_list, &cgroup_roots);
+		cgroup_root_count++;
 
 		sb->s_root->d_fsdata = root_cgrp;
 		root->top_cgroup.dentry = sb->s_root;
@@ -2239,7 +2396,7 @@ static void cgroup_kill_sb(struct super_block *sb)
 
 	if (!list_empty(&root->root_list)) {
 		list_del(&root->root_list);
-		root_count--;
+		cgroup_root_count--;
 	}
 
 	cgroup_exit_root_id(root);
@@ -4112,7 +4269,7 @@ static void cgroup_cfts_commit(struct cgroup_subsys *ss,
 	u64 update_before;
 
 	/* %NULL @cfts indicates abort and don't bother if @ss isn't attached */
-	if (!cfts || ss->root == &rootnode ||
+	if (!cfts || ss->root == &cgroup_dummy_root ||
 	    !atomic_inc_not_zero(&sb->s_active)) {
 		mutex_unlock(&cgroup_mutex);
 		return;
@@ -5592,7 +5749,7 @@ static void init_and_link_css(struct cgroup_subsys_state *css,
 	css->cgroup = cgrp;
 	css->flags = 0;
 	css->id = NULL;
-	if (cgrp == dummytop)
+	if (cgrp == cgroup_dummy_top)
 		css->flags |= CSS_ROOT;
 	BUG_ON(cgrp->subsys[ss->subsys_id]);
 	cgrp->subsys[ss->subsys_id] = css;
@@ -6105,12 +6262,31 @@ static void css_killed_work_fn(struct work_struct *work)
 
 	mutex_lock(&cgroup_mutex);
 
-	do {
-		offline_css(css);
-		css_put(css);
-		/* @css can't go away while we're holding cgroup_mutex */
-		css = css->parent;
-	} while (css && atomic_dec_and_test(&css->online_cnt));
+	/* init base cftset */
+	cgroup_init_cftsets(ss);
+
+	/* Create the top cgroup state for this subsystem */
+	list_add(&ss->sibling, &cgroup_dummy_root.subsys_list);
+	ss->root = &cgroup_dummy_root;
+	css = ss->css_alloc(cgroup_dummy_top);
+	/* We don't handle early failures gracefully */
+	BUG_ON(IS_ERR(css));
+	init_cgroup_css(css, ss, cgroup_dummy_top);
+
+	/* Update the init_css_set to contain a subsys
+	 * pointer to this state - since the subsystem is
+	 * newly registered, all tasks and hence the
+	 * init_css_set is in the subsystem's top cgroup. */
+	init_css_set.subsys[ss->subsys_id] = css;
+
+	need_forkexit_callback |= ss->fork || ss->exit;
+
+	/* At system boot, before all subsystems have been
+	 * registered, no tasks have been forked, so we don't
+	 * need to invoke fork callbacks here. */
+	BUG_ON(!list_empty(&init_task.tasks));
+
+	BUG_ON(online_css(ss, cgroup_dummy_top));
 
 	mutex_unlock(&cgroup_mutex);
 }
@@ -6160,8 +6336,11 @@ static void kill_css(struct cgroup_subsys_state *css)
 	 * Use percpu_ref_kill_and_confirm() to get notifications as each
 	 * css is confirmed to be seen as killed on all CPUs.
 	 */
-	percpu_ref_kill_and_confirm(&css->refcnt, css_killed_ref_fn);
-}
+	if (ss->module == NULL) {
+		/* a sanity check */
+		BUG_ON(cgroup_subsys[ss->subsys_id] != ss);
+		return 0;
+	}
 
 /**
  * cgroup_destroy_locked - the first stage of cgroup destruction
@@ -6194,14 +6373,33 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	struct cgrp_cset_link *link;
 	int ssid;
 
-	lockdep_assert_held(&cgroup_mutex);
+	mutex_lock(&cgroup_mutex);
+	cgroup_subsys[ss->subsys_id] = ss;
 
 	/*
-	 * Only migration can raise populated from zero and we're already
-	 * holding cgroup_mutex.
+	 * no ss->css_alloc seems to need anything important in the ss
+	 * struct, so this can happen first (i.e. before the dummy root
+	 * attachment).
 	 */
-	if (cgroup_is_populated(cgrp))
-		return -EBUSY;
+	css = ss->css_alloc(cgroup_dummy_top);
+	if (IS_ERR(css)) {
+		/* failure case - need to deassign the cgroup_subsys[] slot. */
+		cgroup_subsys[ss->subsys_id] = NULL;
+		mutex_unlock(&cgroup_mutex);
+		return PTR_ERR(css);
+	}
+
+	list_add(&ss->sibling, &cgroup_dummy_root.subsys_list);
+	ss->root = &cgroup_dummy_root;
+
+	/* our new subsystem will be attached to the dummy hierarchy. */
+	init_cgroup_css(css, ss, cgroup_dummy_top);
+	/* init_idr must be after init_cgroup_css because it sets css->id. */
+	if (ss->use_id) {
+		ret = cgroup_init_idr(ss, css);
+		if (ret)
+			goto err_unload;
+	}
 
 	/*
 	 * Make sure there's no live children.  We can't test emptiness of
@@ -6232,7 +6430,7 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	}
 	write_unlock(&css_set_lock);
 
-	ret = online_css(ss, dummytop);
+	ret = online_css(ss, cgroup_dummy_top);
 	if (ret)
 		goto err_unload;
 
@@ -6272,26 +6470,35 @@ static void __init cgroup_init_subsys(struct cgroup_subsys *ss, bool early)
 {
 	struct cgrp_cset_link *link;
 
-	pr_debug("Initializing cgroup subsys %s\n", ss->name);
+	BUG_ON(ss->module == NULL);
+
+	/*
+	 * we shouldn't be called if the subsystem is in use, and the use of
+	 * try_module_get in parse_cgroupfs_options should ensure that it
+	 * doesn't start being used while we're killing it off.
+	 */
+	BUG_ON(ss->root != &cgroup_dummy_root);
 
 	mutex_lock(&cgroup_mutex);
 
-	idr_init(&ss->css_idr);
-	INIT_LIST_HEAD(&ss->cfts);
+	offline_css(ss, cgroup_dummy_top);
 
-	/* Create the root cgroup state for this subsystem */
-	ss->root = &cgrp_dfl_root;
-	css = ss->css_alloc(cgroup_css(&cgrp_dfl_root.cgrp, ss));
-	/* We don't handle early failures gracefully */
-	BUG_ON(IS_ERR(css));
-	init_and_link_css(css, ss, &cgrp_dfl_root.cgrp);
+	if (ss->use_id)
+		idr_destroy(&ss->idr);
+
+	/* deassign the subsys_id */
+	cgroup_subsys[ss->subsys_id] = NULL;
+
+	/* remove subsystem from the dummy root's list of subsystems */
+	list_del_init(&ss->sibling);
 
 	/*
-	 * Root csses are never destroyed and we can't initialize
-	 * percpu_ref during early init.  Disable refcnting.
+	 * disentangle the css from all css_sets attached to the dummy
+	 * top. as in loading, we need to pay our respects to the hashtable
+	 * gods.
 	 */
 	write_lock(&css_set_lock);
-	list_for_each_entry(link, &dummytop->cset_links, cset_link) {
+	list_for_each_entry(link, &cgroup_dummy_top->cset_links, cset_link) {
 		struct css_set *cset = link->cset;
 		unsigned long key;
 
@@ -6303,13 +6510,13 @@ static void __init cgroup_init_subsys(struct cgroup_subsys *ss, bool early)
 	write_unlock(&css_set_lock);
 
 	/*
-	 * remove subsystem's css from the dummytop and free it - need to
-	 * free before marking as null because ss->css_free needs the
-	 * cgrp->subsys pointer to find their state. note that this also
-	 * takes care of freeing the css_id.
+	 * remove subsystem's css from the cgroup_dummy_top and free it -
+	 * need to free before marking as null because ss->css_free needs
+	 * the cgrp->subsys pointer to find their state. note that this
+	 * also takes care of freeing the css_id.
 	 */
-	ss->css_free(dummytop);
-	dummytop->subsys[ss->subsys_id] = NULL;
+	ss->css_free(cgroup_dummy_top);
+	cgroup_dummy_top->subsys[ss->subsys_id] = NULL;
 
 	mutex_unlock(&cgroup_mutex);
 }
@@ -6330,16 +6537,17 @@ int __init cgroup_init_early(void)
 	INIT_LIST_HEAD(&init_css_set.tasks);
 	INIT_HLIST_NODE(&init_css_set.hlist);
 	css_set_count = 1;
-	init_cgroup_root(&rootnode);
-	root_count = 1;
+	init_cgroup_root(&cgroup_dummy_root);
+	cgroup_root_count = 1;
 	init_task.cgroups = &init_css_set;
 
 	init_cgrp_cset_link.cset = &init_css_set;
-	init_cgrp_cset_link.cgrp = dummytop;
-	list_add(&init_cgrp_cset_link.cset_link, &rootnode.top_cgroup.cset_links);
+	init_cgrp_cset_link.cgrp = cgroup_dummy_top;
+	list_add(&init_cgrp_cset_link.cset_link, &cgroup_dummy_top->cset_links);
 	list_add(&init_cgrp_cset_link.cgrp_link, &init_css_set.cgrp_links);
 
-	RCU_INIT_POINTER(init_task.cgroups, &init_css_set);
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		struct cgroup_subsys *ss = cgroup_subsys[i];
 
 	for_each_subsys(ss, i) {
 		WARN(!ss->css_alloc || !ss->css_free || ss->name || ss->id,
@@ -6376,7 +6584,8 @@ int __init cgroup_init(void)
 	BUG_ON(cgroup_init_cftypes(NULL, cgroup_dfl_base_files));
 	BUG_ON(cgroup_init_cftypes(NULL, cgroup_legacy_base_files));
 
-	get_user_ns(init_cgroup_ns.user_ns);
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		struct cgroup_subsys *ss = cgroup_subsys[i];
 
 	mutex_lock(&cgroup_mutex);
 
@@ -6444,7 +6653,7 @@ int __init cgroup_init(void)
 	mutex_lock(&cgroup_mutex);
 	mutex_lock(&cgroup_root_mutex);
 
-	BUG_ON(cgroup_init_root_id(&rootnode));
+	BUG_ON(cgroup_init_root_id(&cgroup_dummy_root));
 
 	mutex_unlock(&cgroup_root_mutex);
 	mutex_unlock(&cgroup_mutex);
@@ -6551,8 +6760,10 @@ static int proc_cgroupstats_show(struct seq_file *m, void *v)
 	 * subsys/hierarchy state.
 	 */
 	mutex_lock(&cgroup_mutex);
-
-	for_each_subsys(ss, i)
+	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+		struct cgroup_subsys *ss = cgroup_subsys[i];
+		if (ss == NULL)
+			continue;
 		seq_printf(m, "%s\t%d\t%d\t%d\n",
 			   ss->legacy_name, ss->root->hierarchy_id,
 			   atomic_read(&ss->root->nr_cgrps), !ss->disabled);
@@ -6689,9 +6900,22 @@ void cgroup_post_fork(struct task_struct *child)
 	 * css_set; otherwise, @child might change state between ->fork()
 	 * and addition to css_set.
 	 */
-	do_each_subsys_mask(ss, i, have_fork_callback) {
-		ss->fork(child);
-	} while_each_subsys_mask();
+	if (need_forkexit_callback) {
+		/*
+		 * fork/exit callbacks are supported only for builtin
+		 * subsystems, and the builtin section of the subsys
+		 * array is immutable, so we don't need to lock the
+		 * subsys array here. On the other hand, modular section
+		 * of the array can be freed at module unload, so we
+		 * can't touch that.
+		 */
+		for (i = 0; i < CGROUP_BUILTIN_SUBSYS_COUNT; i++) {
+			struct cgroup_subsys *ss = cgroup_subsys[i];
+
+			if (ss->fork)
+				ss->fork(child);
+		}
+	}
 }
 
 /**
@@ -6742,7 +6966,7 @@ void cgroup_exit(struct task_struct *tsk, int run_callbacks)
 		 * subsystems, see cgroup_post_fork() for details.
 		 */
 		for (i = 0; i < CGROUP_BUILTIN_SUBSYS_COUNT; i++) {
-			struct cgroup_subsys *ss = subsys[i];
+			struct cgroup_subsys *ss = cgroup_subsys[i];
 
 			if (ss->exit) {
 				struct cgroup *old_cgrp =
@@ -6865,6 +7089,8 @@ static int __init cgroup_disable(char *str)
 	while ((token = strsep(&str, ",")) != NULL) {
 		if (!*token)
 			continue;
+		for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
+			struct cgroup_subsys *ss = cgroup_subsys[i];
 
 		for_each_subsys(ss, i) {
 			if (strcmp(token, ss->name) &&
