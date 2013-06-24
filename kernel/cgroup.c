@@ -731,7 +731,6 @@ static struct css_set *find_existing_css_set(struct css_set *old_cset,
 					struct cgroup *cgrp,
 					struct cgroup_subsys_state *template[])
 {
-	int i;
 	struct cgroupfs_root *root = cgrp->root;
 	struct css_set *cg;
 	unsigned long key;
@@ -839,12 +838,14 @@ static void link_css_set(struct list_head *tmp_links, struct css_set *cset,
 static struct css_set *find_css_set(struct css_set *old_cset,
 				    struct cgroup *cgrp)
 {
-	struct css_set *res;
-	struct cgroup_subsys_state *template[CGROUP_SUBSYS_COUNT];
+	struct cgroup_subsys_state *template[CGROUP_SUBSYS_COUNT] = { };
+	struct css_set *cset;
 	struct list_head tmp_links;
 	struct cgrp_cset_link *link;
 	unsigned long key;
 	int ssid;
+
+	lockdep_assert_held(&cgroup_mutex);
 
 	lockdep_assert_held(&cgroup_mutex);
 
