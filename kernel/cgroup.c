@@ -1384,17 +1384,14 @@ static void cgroup_d_remove_dir(struct dentry *dentry)
  * returns an error, no reference counts are touched.
  */
 static int rebind_subsystems(struct cgroupfs_root *root,
-			      unsigned long final_subsys_mask)
+			     unsigned long added_mask, unsigned removed_mask)
 {
-	unsigned long added_mask, removed_mask;
 	struct cgroup *cgrp = &root->top_cgroup;
 	int i;
 
 	BUG_ON(!mutex_is_locked(&cgroup_mutex));
 	BUG_ON(!mutex_is_locked(&cgroup_root_mutex));
 
-	removed_mask = root->actual_subsys_mask & ~final_subsys_mask;
-	added_mask = final_subsys_mask & ~root->actual_subsys_mask;
 	/* Check that any added subsystems are currently free */
 	for (i = 0; i < CGROUP_SUBSYS_COUNT; i++) {
 		unsigned long bit = 1UL << i;
@@ -1426,27 +1423,33 @@ static int rebind_subsystems(struct cgroupfs_root *root,
 			BUG_ON(cgrp->subsys[i]);
 			BUG_ON(!cgroup_dummy_top->subsys[i]);
 			BUG_ON(cgroup_dummy_top->subsys[i]->cgroup != cgroup_dummy_top);
+
 			cgrp->subsys[i] = cgroup_dummy_top->subsys[i];
 			cgrp->subsys[i]->cgroup = cgrp;
 			list_move(&ss->sibling, &root->subsys_list);
 			ss->root = root;
 			if (ss->bind)
 				ss->bind(cgrp);
+
 			/* refcount was already taken, and we're keeping it */
+			root->subsys_mask |= bit;
 		} else if (bit & removed_mask) {
 			/* We're removing this subsystem */
 			BUG_ON(ss == NULL);
 			BUG_ON(cgrp->subsys[i] != cgroup_dummy_top->subsys[i]);
 			BUG_ON(cgrp->subsys[i]->cgroup != cgrp);
+
 			if (ss->bind)
 				ss->bind(cgroup_dummy_top);
 			cgroup_dummy_top->subsys[i]->cgroup = cgroup_dummy_top;
 			cgrp->subsys[i] = NULL;
 			cgroup_subsys[i]->root = &cgroup_dummy_root;
 			list_move(&ss->sibling, &cgroup_dummy_root.subsys_list);
+
 			/* subsystem is now free - drop reference on module */
 			module_put(ss->module);
-		} else if (bit & final_subsys_mask) {
+			root->subsys_mask &= ~bit;
+		} else if (bit & root->subsys_mask) {
 			/* Subsystem state should already exist */
 			BUG_ON(ss == NULL);
 			BUG_ON(!cgrp->subsys[i]);
@@ -1462,6 +1465,7 @@ static int rebind_subsystems(struct cgroupfs_root *root,
 			dcgrp->subtree_control |= 1 << ssid;
 			static_branch_disable(cgroup_subsys_on_dfl_key[ssid]);
 		}
+	}
 
 		ret = cgroup_apply_control(dcgrp);
 		if (ret)
@@ -1768,10 +1772,9 @@ static int cgroup_remount(struct super_block *sb, int *flags, char *data)
 	if (ret)
 		goto out_unlock;
 
-	if (opts.subsys_mask != root->subsys_mas
-		__setup || opts.release_agent)
-		pr_warn("option changes via remount are deprecated (pid=%d comm=%s)\n",
-			task_tgid_nr(current), current->comm);
+	if (opts.subsys_mask != root->subsys_mask || opts.release_agent)
+		pr_warning("cgroup: option changes via remount are deprecated (pid=%d comm=%s)\n",
+			   task_tgid_nr(current), current->comm);
 
 	added_mask = opts.subsys_mask & ~root->subsys_mask;
 	removed_mask = root->subsys_mask & ~opts.subsys_mask;
@@ -1785,9 +1788,18 @@ static int cgroup_remount(struct super_block *sb, int *flags, char *data)
 		goto out_unlock;
 	}
 
-	/* remounting is not allowed for populated hierarchies */
-	if (!list_empty(&root->cgrp.self.children)) {
-		ret = -EBUSY;
+	/*
+	 * Clear out the files of subsystems that should be removed, do
+	 * this before rebind_subsystems, since rebind_subsystems may
+	 * change this hierarchy's subsys_list.
+	 */
+	cgroup_clear_directory(cgrp->dentry, false, removed_mask);
+
+	ret = rebind_subsystems(root, added_mask, removed_mask);
+	if (ret) {
+		/* rebind_subsystems failed, re-populate the removed files */
+		cgroup_populate_dir(cgrp, false, removed_mask);
+		drop_parsed_module_refcounts(opts.subsys_mask);
 		goto out_unlock;
 	}
 
@@ -2189,7 +2201,7 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		if (ret)
 			goto unlock_drop;
 
-		ret = rebind_subsystems(root, root->subsys_mask);
+		ret = rebind_subsystems(root, root->subsys_mask, 0);
 		if (ret == -EBUSY) {
 			free_cgrp_cset_links(&tmp_links);
 			goto unlock_drop;
@@ -2328,7 +2340,7 @@ static void cgroup_kill_sb(struct super_block *sb) {
 	mutex_lock(&cgroup_root_mutex);
 
 	/* Rebind all subsystems back to the default hierarchy */
-	ret = rebind_subsystems(root, 0);
+	ret = rebind_subsystems(root, 0, root->subsys_mask);
 	/* Shouldn't be able to fail ... */
 	BUG_ON(ret);
 
