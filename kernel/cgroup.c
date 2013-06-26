@@ -1085,6 +1085,12 @@ static int rebind_subsystems(struct cgroupfs_root *root,
 		}
 	}
 
+	/*
+	 * Mark @root has finished binding subsystems.  @root->subsys_mask
+	 * now matches the bound subsystems.
+	 */
+	root->flags |= CGRP_ROOT_SUBSYS_BOUND;
+
 	return 0;
 }
 
@@ -1484,6 +1490,14 @@ static struct cgroupfs_root *cgroup_root_from_opts(struct cgroup_sb_opts *opts)
 
 	init_cgroup_root(root);
 
+	/*
+	 * We need to set @root->subsys_mask now so that @root can be
+	 * matched by cgroup_test_super() before it finishes
+	 * initialization; otherwise, competing mounts with the same
+	 * options may try to bind the same subsystems instead of waiting
+	 * for the first one leading to unexpected mount errors.
+	 * SUBSYS_BOUND will be set once actual binding is complete.
+	 */
 	root->subsys_mask = opts->subsys_mask;
 	root->flags = opts->flags;
 	ida_init(&root->cgroup_ida);
@@ -1713,37 +1727,35 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
  drop_modules:
 	drop_parsed_module_refcounts(opts.subsys_mask);
  out_err:
-	 cgroup_migrate_finish(&preloaded_csets);
-	 mutex_unlock(&cgroup_mutex);
-	 return ret;
- }
- 
- /*
-  * Stuff for reading the 'tasks'/'procs' files.
-  *
-  * Reading this file can return large amounts of data if a cgroup has
-  * *lots* of attached tasks. So it may need several calls to read(),
-  * but we cannot guarantee that the information we produce is correct
-  * unless we produce it entirely atomically.
-  *
-  */
- 
- /* which pidlist file are we talking about? */
- enum cgroup_filetype {
-	 CGROUP_FILE_PROCS,
-	 CGROUP_FILE_TASKS,
- };
- 
- /*
-  * A pidlist is a list of pids that virtually represents the contents of one
-  * of the cgroup files ("procs" or "tasks"). We keep a list of such pidlists,
-  * a pair (one each for procs, tasks) for each pid namespace that's relevant
-  * to the cgroup.
-  */
- struct cgroup_pidlist {
-	 /*
-	  * used to find which pidlist is wanted. doesn't change as long as
-	  * this particular list stays in the list.
+	kfree(opts.release_agent);
+	kfree(opts.name);
+	return ERR_PTR(ret);
+}
+
+static void cgroup_kill_sb(struct super_block *sb) {
+	struct cgroupfs_root *root = sb->s_fs_info;
+	struct cgroup *cgrp = &root->top_cgroup;
+	struct cgrp_cset_link *link, *tmp_link;
+	int ret;
+
+	BUG_ON(!root);
+
+	BUG_ON(root->number_of_cgroups != 1);
+	BUG_ON(!list_empty(&cgrp->children));
+
+	mutex_lock(&cgroup_mutex);
+	mutex_lock(&cgroup_root_mutex);
+
+	/* Rebind all subsystems back to the default hierarchy */
+	if (root->flags & CGRP_ROOT_SUBSYS_BOUND) {
+		ret = rebind_subsystems(root, 0, root->subsys_mask);
+		/* Shouldn't be able to fail ... */
+		BUG_ON(ret);
+	}
+
+	/*
+	 * Release all the links from cset_links to this hierarchy's
+	 * root cgroup
 	 */
 	write_lock(&css_set_lock);
 
