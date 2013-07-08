@@ -526,6 +526,9 @@ enum res_type {
  */
 static DEFINE_MUTEX(memcg_create_mutex);
 
+static void mem_cgroup_put(struct mem_cgroup *memcg);
+
+static inline
 struct mem_cgroup *mem_cgroup_from_css(struct cgroup_subsys_state *s)
 {
 	return s ? container_of(s, struct mem_cgroup, css) : NULL;
@@ -6374,6 +6377,40 @@ static void __mem_cgroup_free(struct mem_cgroup *memcg)
 		kfree(memcg);
 	else
 		vfree(memcg);
+}
+
+
+/*
+ * Helpers for freeing a kmalloc()ed/vzalloc()ed mem_cgroup by RCU,
+ * but in process context.  The work_freeing structure is overlaid
+ * on the rcu_freeing structure, which itself is overlaid on memsw.
+ */
+static void free_work(struct work_struct *work)
+{
+	struct mem_cgroup *memcg;
+
+	memcg = container_of(work, struct mem_cgroup, work_freeing);
+	__mem_cgroup_free(memcg);
+}
+
+static void free_rcu(struct rcu_head *rcu_head)
+{
+	struct mem_cgroup *memcg;
+
+	memcg = container_of(rcu_head, struct mem_cgroup, rcu_freeing);
+	INIT_WORK(&memcg->work_freeing, free_work);
+	schedule_work(&memcg->work_freeing);
+}
+
+static void __mem_cgroup_put(struct mem_cgroup *memcg, int count)
+{
+	if (atomic_sub_and_test(count, &memcg->refcnt))
+		call_rcu(&memcg->rcu_freeing, free_rcu);
+}
+
+static void mem_cgroup_put(struct mem_cgroup *memcg)
+{
+	__mem_cgroup_put(memcg, 1);
 }
 
 /*
