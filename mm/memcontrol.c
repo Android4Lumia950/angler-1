@@ -385,10 +385,6 @@ struct mem_cgroup {
 	atomic_t	numainfo_updating;
 #endif
 
-	/* List of events which userspace want to receive */
-	struct list_head event_list;
-	spinlock_t event_list_lock;
-
 	struct mem_cgroup_per_node *nodeinfo[0];
 	/* WARNING: nodeinfo must be the last member here */
 };
