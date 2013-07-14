@@ -1082,7 +1082,18 @@ static struct cgroup *task_cgroup_from_root(struct task_struct *task,
  * update of a tasks cgroup pointer by cgroup_attach_task()
  */
 
-static struct kernfs_syscall_ops cgroup_kf_syscall_ops;
+/*
+ * A couple of forward declarations required, due to cyclic reference loop:
+ * cgroup_mkdir -> cgroup_create -> cgroup_populate_dir ->
+ * cgroup_add_file -> cgroup_create_file -> cgroup_dir_inode_operations
+ * -> cgroup_mkdir.
+ */
+
+static int cgroup_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
+static int cgroup_rmdir(struct inode *unused_dir, struct dentry *dentry);
+static int cgroup_populate_dir(struct cgroup *cgrp, bool base_files,
+			       unsigned long subsys_mask);
+static const struct inode_operations cgroup_dir_inode_operations;
 static const struct file_operations proc_cgroupstats_operations;
 
 static char *cgroup_file_name(struct cgroup *cgrp, const struct cftype *cft,
@@ -3324,7 +3335,106 @@ static int cgroup_subtree_control_show(struct seq_file *seq, void *v)
 {
 	struct cgroup *cgrp = seq_css(seq)->cgroup;
 
-	cgroup_print_ss_mask(seq, cgrp->subtree_control);
+static int cgroup_removexattr(struct dentry *dentry, const char *name)
+{
+	if (!xattr_enabled(dentry))
+		return -EOPNOTSUPP;
+	if (!is_valid_xattr(name))
+		return -EINVAL;
+	return simple_xattr_remove(__d_xattrs(dentry), name);
+}
+
+static ssize_t cgroup_getxattr(struct dentry *dentry, const char *name,
+			       void *buf, size_t size)
+{
+	if (!xattr_enabled(dentry))
+		return -EOPNOTSUPP;
+	if (!is_valid_xattr(name))
+		return -EINVAL;
+	return simple_xattr_get(__d_xattrs(dentry), name, buf, size);
+}
+
+static ssize_t cgroup_listxattr(struct dentry *dentry, char *buf, size_t size)
+{
+	if (!xattr_enabled(dentry))
+		return -EOPNOTSUPP;
+	return simple_xattr_list(__d_xattrs(dentry), buf, size);
+}
+
+static const struct file_operations cgroup_file_operations = {
+	.read = cgroup_file_read,
+	.write = cgroup_file_write,
+	.llseek = generic_file_llseek,
+	.open = cgroup_file_open,
+	.release = cgroup_file_release,
+};
+
+static const struct inode_operations cgroup_file_inode_operations = {
+	.setxattr = cgroup_setxattr,
+	.getxattr = cgroup_getxattr,
+	.listxattr = cgroup_listxattr,
+	.removexattr = cgroup_removexattr,
+};
+
+static const struct inode_operations cgroup_dir_inode_operations = {
+	.lookup = simple_lookup,
+	.mkdir = cgroup_mkdir,
+	.rmdir = cgroup_rmdir,
+	.rename = cgroup_rename,
+	.setxattr = cgroup_setxattr,
+	.getxattr = cgroup_getxattr,
+	.listxattr = cgroup_listxattr,
+	.removexattr = cgroup_removexattr,
+};
+
+/*
+ * Check if a file is a control file
+ */
+static inline struct cftype *__file_cft(struct file *file)
+{
+	if (file_inode(file)->i_fop != &cgroup_file_operations)
+		return ERR_PTR(-EINVAL);
+	return __d_cft(file->f_dentry);
+}
+
+static int cgroup_create_file(struct dentry *dentry, umode_t mode,
+				struct super_block *sb)
+{
+	struct inode *inode;
+
+	if (!dentry)
+		return -ENOENT;
+	if (dentry->d_inode)
+		return -EEXIST;
+
+	inode = cgroup_new_inode(mode, sb);
+	if (!inode)
+		return -ENOMEM;
+
+	if (S_ISDIR(mode)) {
+		inode->i_op = &cgroup_dir_inode_operations;
+		inode->i_fop = &simple_dir_operations;
+
+		/* start off with i_nlink == 2 (for "." entry) */
+		inc_nlink(inode);
+		inc_nlink(dentry->d_parent->d_inode);
+
+		/*
+		 * Control reaches here with cgroup_mutex held.
+		 * @inode->i_mutex should nest outside cgroup_mutex but we
+		 * want to populate it immediately without releasing
+		 * cgroup_mutex.  As @inode isn't visible to anyone else
+		 * yet, trylock will always succeed without affecting
+		 * lockdep checks.
+		 */
+		WARN_ON_ONCE(!mutex_trylock(&inode->i_mutex));
+	} else if (S_ISREG(mode)) {
+		inode->i_size = 0;
+		inode->i_fop = &cgroup_file_operations;
+		inode->i_op = &cgroup_file_inode_operations;
+	}
+	d_instantiate(dentry, inode);
+	dget(dentry);	/* Extra count - pin the dentry in core */
 	return 0;
 }
 
