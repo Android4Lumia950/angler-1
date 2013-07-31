@@ -386,8 +386,8 @@ struct cgroup_map_cb {
 
 /* cftype->flags */
 enum {
-	CFTYPE_ONLY_ON_ROOT	= (1 << 0),	/* only create on root cg */
-	CFTYPE_NOT_ON_ROOT	= (1 << 1),	/* don't create on root cg */
+	CFTYPE_ONLY_ON_ROOT	= (1 << 0),	/* only create on root cgrp */
+	CFTYPE_NOT_ON_ROOT	= (1 << 1),	/* don't create on root cgrp */
 	CFTYPE_INSANE		= (1 << 2),	/* don't create if sane_behavior */
 };
 
@@ -503,24 +503,18 @@ struct cftype {
 	for ((pos) = css_next_descendant_pre(NULL, (css)); (pos);	\
 	     (pos) = css_next_descendant_pre((pos), (css)))
 
-/**
- * css_for_each_descendant_post - post-order walk of a css's descendants
- * @pos: the css * to use as the loop cursor
- * @css: css whose descendants to walk
- *
- * Similar to css_for_each_descendant_pre() but performs post-order
- * traversal instead.  @root is included in the iteration and the last
- * node to be visited.
- *
- * If a subsystem synchronizes ->css_online() and the start of iteration, a
- * css which finished ->css_online() is guaranteed to be visible in the
- * future iterations and will stay visible until the last reference is put.
- * A css which hasn't finished ->css_online() or already finished
- * ->css_offline() may show up during traversal.  It's each subsystem's
- * responsibility to synchronize against on/offlining.
- *
- * Note that the walk visibility guarantee example described in pre-order
- * walk doesn't apply the same to post-order walks.
+struct cgroup_scanner {
+	struct cgroup *cgrp;
+	int (*test_task)(struct task_struct *p, struct cgroup_scanner *scan);
+	void (*process_task)(struct task_struct *p,
+			struct cgroup_scanner *scan);
+	struct ptr_heap *heap;
+	void *data;
+};
+
+/*
+ * See the comment above CGRP_ROOT_SANE_BEHAVIOR for details.  This
+ * function can be called as long as @cgrp is accessible.
  */
 static inline bool cgroup_sane_behavior(const struct cgroup *cgrp)
 {
