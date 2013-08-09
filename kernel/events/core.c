@@ -8433,9 +8433,8 @@ perf_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 
 static void perf_cgroup_css_free(struct cgroup_subsys_state *css)
 {
-	struct perf_cgroup *jc;
-	jc = container_of(cgroup_css(cont, perf_subsys_id),
-			  struct perf_cgroup, css);
+	struct perf_cgroup *jc = container_of(css, struct perf_cgroup, css);
+
 	free_percpu(jc->info);
 	kfree(jc);
 }
@@ -8447,16 +8446,34 @@ static int __perf_cgroup_move(void *info)
 	return 0;
 }
 
-static void perf_cgroup_attach(struct cgroup_taskset *tset)
+static void perf_cgroup_attach(struct cgroup_subsys_state *css,
+			       struct cgroup_taskset *tset)
 {
 	struct task_struct *task;
 	struct cgroup_subsys_state *css;
 
-	cgroup_taskset_for_each(task, css, tset)
+	cgroup_taskset_for_each(task, css->cgroup, tset)
 		task_function_call(task, __perf_cgroup_move, task);
 }
 
-struct cgroup_subsys perf_event_cgrp_subsys = {
+static void perf_cgroup_exit(struct cgroup_subsys_state *css,
+			     struct cgroup_subsys_state *old_css,
+			     struct task_struct *task)
+{
+	/*
+	 * cgroup_exit() is called in the copy_process() failure path.
+	 * Ignore this case since the task hasn't ran yet, this avoids
+	 * trying to poke a half freed task state from generic code.
+	 */
+	if (!(task->flags & PF_EXITING))
+		return;
+
+	task_function_call(task, __perf_cgroup_move, task);
+}
+
+struct cgroup_subsys perf_subsys = {
+	.name		= "perf_event",
+	.subsys_id	= perf_subsys_id,
 	.css_alloc	= perf_cgroup_css_alloc,
 	.css_free	= perf_cgroup_css_free,
 	.attach		= perf_cgroup_attach,

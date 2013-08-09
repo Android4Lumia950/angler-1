@@ -150,7 +150,7 @@ out:
  */
 static void hugetlb_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
-	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_cgroup(cgroup);
+	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
 	struct hstate *h;
 	struct page *page;
 	int idx = 0;

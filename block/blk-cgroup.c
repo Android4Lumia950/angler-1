@@ -914,7 +914,8 @@ void blkcg_exit_queue(struct request_queue *q)
  * of the main cic data structures.  For now we allow a task to change
  * its cgroup only if it's the only owner of its ioc.
  */
-static int blkcg_can_attach(struct cgroup_taskset *tset)
+static int blkcg_can_attach(struct cgroup_subsys_state *css,
+			    struct cgroup_taskset *tset)
 {
 	struct task_struct *task;
 	struct cgroup_subsys_state *dst_css;
@@ -922,7 +923,7 @@ static int blkcg_can_attach(struct cgroup_taskset *tset)
 	int ret = 0;
 
 	/* task_lock() is needed to avoid races with exit_io_context() */
-	cgroup_taskset_for_each(task, dst_css, tset) {
+	cgroup_taskset_for_each(task, css->cgroup, tset) {
 		task_lock(task);
 		ioc = task->io_context;
 		if (ioc && atomic_read(&ioc->nr_tasks) > 1)

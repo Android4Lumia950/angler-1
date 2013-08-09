@@ -68,7 +68,7 @@ static inline struct dev_cgroup *task_devcgroup(struct task_struct *task)
 
 struct cgroup_subsys devices_subsys;
 
-static int devcgroup_can_attach(struct cgroup *new_cgrp,
+static int devcgroup_can_attach(struct cgroup_subsys_state *new_css,
 				struct cgroup_taskset *set)
 {
 	struct task_struct *task = cgroup_taskset_first(set);
@@ -198,8 +198,8 @@ static inline bool is_devcg_online(const struct dev_cgroup *devcg)
  */
 static int devcgroup_online(struct cgroup_subsys_state *css)
 {
-	struct dev_cgroup *dev_cgroup = cgroup_to_devcgroup(cgroup);
-	struct dev_cgroup *parent_dev_cgroup = css_to_devcgroup(css_parent(&dev_cgroup->css));
+	struct dev_cgroup *dev_cgroup = css_to_devcgroup(css);
+	struct dev_cgroup *parent_dev_cgroup = css_to_devcgroup(css_parent(css));
 	int ret = 0;
 
 	mutex_lock(&devcgroup_mutex);

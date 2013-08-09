@@ -9752,13 +9752,6 @@ static inline struct task_group *cgroup_tg(struct cgroup *cgrp)
 	return css_tg(cgroup_css(cgrp, cpu_cgroup_subsys_id));
 }
 
-#ifdef CONFIG_CGROUP_SCHED
-
-static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
-{
-	return css ? container_of(css, struct task_group, css) : NULL;
-}
-
 static struct cgroup_subsys_state *
 cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 {
@@ -9779,37 +9772,37 @@ cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 	return &tg->css;
 }
 
-static void cpu_cgroup_css_released(struct cgroup_subsys_state *css)
+static int cpu_cgroup_css_online(struct cgroup_subsys_state *css)
 {
-	struct task_group *tg = cgroup_tg(cgrp);
-	struct task_group *parent = css_tg(css_parent(&tg->css));
+	struct task_group *tg = css_tg(css);
+	struct task_group *parent = css_tg(css_parent(css));
 
 	if (parent)
 		sched_online_group(tg, parent);
 	return 0;
 }
 
-static void cpu_cgroup_css_free(struct cgroup *cgrp)
+static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
 {
-	struct task_group *tg = cgroup_tg(cgrp);
+	struct task_group *tg = css_tg(css);
 
 	sched_destroy_group(tg);
 }
 
-static void cpu_cgroup_css_offline(struct cgroup *cgrp)
+static void cpu_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
-	struct task_group *tg = cgroup_tg(cgrp);
+	struct task_group *tg = css_tg(css);
 
 	sched_offline_group(tg);
 }
 
-static int cpu_cgroup_can_attach(struct cgroup *cgrp,
+static int cpu_cgroup_can_attach(struct cgroup_subsys_state *css,
 				 struct cgroup_taskset *tset)
 {
 	struct task_struct *task;
 	struct cgroup_subsys_state *css;
 
-	cgroup_taskset_for_each(task, css, tset) {
+	cgroup_taskset_for_each(task, css->cgroup, tset) {
 #ifdef CONFIG_RT_GROUP_SCHED
 		if (!sched_rt_can_attach(css_tg(css), task))
 			return -EINVAL;
@@ -9822,16 +9815,32 @@ static int cpu_cgroup_can_attach(struct cgroup *cgrp,
 	return 0;
 }
 
-static void cpu_cgroup_attach(struct cgroup_taskset *tset)
+static void cpu_cgroup_attach(struct cgroup_subsys_state *css,
+			      struct cgroup_taskset *tset)
 {
 	struct task_struct *task;
 	struct cgroup_subsys_state *css;
 
-	cgroup_taskset_for_each(task, css, tset)
+	cgroup_taskset_for_each(task, css->cgroup, tset)
 		sched_move_task(task);
 }
 
-static u64 cpu_notify_on_migrate_read_u64(struct cgroup_subsys_state *css,
+static void cpu_cgroup_exit(struct cgroup_subsys_state *css,
+			    struct cgroup_subsys_state *old_css,
+			    struct task_struct *task)
+{
+	/*
+	 * cgroup_exit() is called in the copy_process() failure path.
+	 * Ignore this case since the task hasn't ran yet, this avoids
+	 * trying to poke a half freed task state from generic code.
+	 */
+	if (!(task->flags & PF_EXITING))
+		return;
+
+	sched_move_task(task);
+}
+
+static u64 cpu_notify_on_migrate_read_u64(struct cgroup *cgrp,
 					  struct cftype *cft)
 {
 	struct task_group *tg = css_tg(css);

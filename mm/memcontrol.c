@@ -6479,8 +6479,8 @@ free_out:
 static int
 mem_cgroup_css_online(struct cgroup_subsys_state *css)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
-	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(css));
 	int error = 0;
 
 	if (!parent)
@@ -6538,7 +6538,7 @@ static void mem_cgroup_invalidate_reclaim_iterators(struct mem_cgroup *memcg)
 
 static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
 	mem_cgroup_invalidate_reclaim_iterators(memcg);
 	mem_cgroup_reparent_charges(memcg);
@@ -6548,7 +6548,6 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-	struct cgroup_event *event, *tmp;
 
 	/*
 	 * Unregister events and notify userspace.
@@ -6930,12 +6929,12 @@ static void mem_cgroup_clear_mc(void)
 	mem_cgroup_end_move(from);
 }
 
-static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
+static int mem_cgroup_can_attach(struct cgroup_subsys_state *css,
+				 struct cgroup_taskset *tset)
 {
 	struct task_struct *leader, *p;
 	int ret = 0;
-	struct cgroup_subsys_state *css;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	unsigned long move_charge_at_immigrate;
 
 	/* charge immigration isn't supported on the default hierarchy */
@@ -6996,7 +6995,7 @@ static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
 	return ret;
 }
 
-static void mem_cgroup_cancel_attach(struct cgroup *cgroup,
+static void mem_cgroup_cancel_attach(struct cgroup_subsys_state *css,
 				     struct cgroup_taskset *tset)
 {
 	mem_cgroup_clear_mc();
@@ -7144,7 +7143,8 @@ retry:
 	up_read(&mm->mmap_sem);
 }
 
-static void mem_cgroup_move_task(struct cgroup_taskset *tset)
+static void mem_cgroup_move_task(struct cgroup_subsys_state *css,
+				 struct cgroup_taskset *tset)
 {
 	struct cgroup_subsys_state *css;
 	struct task_struct *p = cgroup_taskset_first(tset, &css);
@@ -7159,15 +7159,17 @@ static void mem_cgroup_move_task(struct cgroup_taskset *tset)
 		mem_cgroup_clear_mc();
 }
 #else	/* !CONFIG_MMU */
-static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
+static int mem_cgroup_can_attach(struct cgroup_subsys_state *css,
+				 struct cgroup_taskset *tset)
 {
 	return 0;
 }
-static void mem_cgroup_cancel_attach(struct cgroup *cgroup,
+static void mem_cgroup_cancel_attach(struct cgroup_subsys_state *css,
 				     struct cgroup_taskset *tset)
 {
 }
-static void mem_cgroup_move_task(struct cgroup_taskset *tset)
+static void mem_cgroup_move_task(struct cgroup_subsys_state *css,
+				 struct cgroup_taskset *tset)
 {
 }
 #endif
@@ -7184,7 +7186,7 @@ static void mem_cgroup_bind(struct cgroup_subsys_state *root_css)
 	 * guarantees that @root doesn't have any children, so turning it
 	 * on for the root memcg is enough.
 	 */
-	if (cgroup_on_dfl(root_css->cgroup))
+	if (cgroup_sane_behavior(root_css->cgroup))
 		mem_cgroup_from_css(root_css)->use_hierarchy = true;
 }
 

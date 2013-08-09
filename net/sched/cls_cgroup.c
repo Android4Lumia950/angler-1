@@ -51,8 +51,8 @@ cgrp_css_alloc(struct cgroup_subsys_state *parent_css)
 
 static int cgrp_css_online(struct cgroup_subsys_state *css)
 {
-	struct cgroup_cls_state *cs = cgrp_cls_state(cgrp);
-	struct cgroup_cls_state *parent = css_cls_state(css_parent(&cs->css));
+	struct cgroup_cls_state *cs = css_cls_state(css);
+	struct cgroup_cls_state *parent = css_cls_state(css_parent(css));
 
 	if (parent)
 		cs->classid = parent->classid;
@@ -80,7 +80,7 @@ static void cgrp_attach(struct cgroup_subsys_state *css,
 	struct cgroup_cls_state *cs = css_cls_state(css);
 	void *v = (void *)(unsigned long)cs->classid;
 
-	cgroup_taskset_for_each(p, css, tset) {
+	cgroup_taskset_for_each(p, css->cgroup, tset) {
 		task_lock(p);
 		iterate_fd(p->files, 0, update_classid, v);
 		task_unlock(p);
