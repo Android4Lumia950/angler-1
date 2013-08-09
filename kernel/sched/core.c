@@ -9739,12 +9739,17 @@ int sched_rr_handler(struct ctl_table *table, int write,
 	return ret;
 }
 
-int sched_rt_handler(struct ctl_table *table, int write,
-		void __user *buffer, size_t *lenp,
-		loff_t *ppos)
+#ifdef CONFIG_CGROUP_SCHED
+
+static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
 {
-	return container_of(cgroup_css(cgrp, cpu_cgroup_subsys_id),
-			    struct task_group, css);
+	return css ? container_of(css, struct task_group, css) : NULL;
+}
+
+/* return corresponding task_group object of a cgroup */
+static inline struct task_group *cgroup_tg(struct cgroup *cgrp)
+{
+	return css_tg(cgroup_css(cgrp, cpu_cgroup_subsys_id));
 }
 
 #ifdef CONFIG_CGROUP_SCHED
