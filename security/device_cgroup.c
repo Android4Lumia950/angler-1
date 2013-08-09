@@ -53,12 +53,29 @@ struct dev_cgroup {
 
 static inline struct dev_cgroup *css_to_devcgroup(struct cgroup_subsys_state *s)
 {
-	return s ? container_of(s, struct dev_cgroup, css) : NULL;
+	return container_of(s, struct dev_cgroup, css);
+}
+
+static inline struct dev_cgroup *cgroup_to_devcgroup(struct cgroup *cgroup)
+{
+	return css_to_devcgroup(cgroup_css(cgroup, devices_subsys_id));
 }
 
 static inline struct dev_cgroup *task_devcgroup(struct task_struct *task)
 {
-	return css_to_devcgroup(task_css(task, devices_cgrp_id));
+	return css_to_devcgroup(task_css(task, devices_subsys_id));
+}
+
+struct cgroup_subsys devices_subsys;
+
+static int devcgroup_can_attach(struct cgroup *new_cgrp,
+				struct cgroup_taskset *set)
+{
+	struct task_struct *task = cgroup_taskset_first(set);
+
+	if (current != task && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	return 0;
 }
 
 /*

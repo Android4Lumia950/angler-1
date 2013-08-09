@@ -358,7 +358,7 @@ struct perf_cgroup {
 static inline struct perf_cgroup *
 perf_cgroup_from_task(struct task_struct *task)
 {
-	return container_of(task_css(task, perf_event_cgrp_id),
+	return container_of(task_css(task, perf_subsys_id),
 			    struct perf_cgroup, css);
 }
 
@@ -8433,8 +8433,9 @@ perf_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 
 static void perf_cgroup_css_free(struct cgroup_subsys_state *css)
 {
-	struct perf_cgroup *jc = container_of(css, struct perf_cgroup, css);
-
+	struct perf_cgroup *jc;
+	jc = container_of(cgroup_css(cont, perf_subsys_id),
+			  struct perf_cgroup, css);
 	free_percpu(jc->info);
 	kfree(jc);
 }

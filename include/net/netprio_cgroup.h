@@ -31,7 +31,7 @@ static inline u32 task_netprioidx(struct task_struct *p)
 	u32 idx;
 
 	rcu_read_lock();
-	css = task_css(p, net_prio_cgrp_id);
+	css = task_css(p, net_prio_subsys_id);
 	idx = css->cgroup->id;
 	rcu_read_unlock();
 	return idx;
@@ -42,7 +42,12 @@ static inline void sock_update_netprioidx(struct sock_cgroup_data *skcd)
 	if (in_interrupt())
 		return;
 
-	sock_cgroup_set_prioidx(skcd, task_netprioidx(current));
+	rcu_read_lock();
+	css = task_css(p, net_prio_subsys_id);
+	if (css)
+		idx = css->cgroup->id;
+	rcu_read_unlock();
+	return idx;
 }
 
 #else /* !CONFIG_CGROUP_NET_PRIO */

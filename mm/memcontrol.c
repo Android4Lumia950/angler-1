@@ -1095,6 +1095,11 @@ static void memcg_check_events(struct mem_cgroup *memcg, struct page *page)
 		preempt_enable();
 }
 
+struct mem_cgroup *mem_cgroup_from_cont(struct cgroup *cont)
+{
+	return mem_cgroup_from_css(cgroup_css(cont, mem_cgroup_subsys_id));
+}
+
 struct mem_cgroup *mem_cgroup_from_task(struct task_struct *p)
 {
 	/*
@@ -1105,7 +1110,7 @@ struct mem_cgroup *mem_cgroup_from_task(struct task_struct *p)
 	if (unlikely(!p))
 		return NULL;
 
-	return mem_cgroup_from_css(task_css(p, memory_cgrp_id));
+	return mem_cgroup_from_css(task_css(p, mem_cgroup_subsys_id));
 }
 
 struct mem_cgroup *try_get_mem_cgroup_from_mm(struct mm_struct *mm)

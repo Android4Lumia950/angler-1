@@ -35,13 +35,19 @@ static struct hugetlb_cgroup *root_h_cgroup __read_mostly;
 static inline
 struct hugetlb_cgroup *hugetlb_cgroup_from_css(struct cgroup_subsys_state *s)
 {
-	return s ? container_of(s, struct hugetlb_cgroup, css) : NULL;
+	return container_of(s, struct hugetlb_cgroup, css);
+}
+
+static inline
+struct hugetlb_cgroup *hugetlb_cgroup_from_cgroup(struct cgroup *cgroup)
+{
+	return hugetlb_cgroup_from_css(cgroup_css(cgroup, hugetlb_subsys_id));
 }
 
 static inline
 struct hugetlb_cgroup *hugetlb_cgroup_from_task(struct task_struct *task)
 {
-	return hugetlb_cgroup_from_css(task_css(task, hugetlb_cgrp_id));
+	return hugetlb_cgroup_from_css(task_css(task, hugetlb_subsys_id));
 }
 
 static inline bool hugetlb_cgroup_is_root(struct hugetlb_cgroup *h_cg)

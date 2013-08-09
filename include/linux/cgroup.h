@@ -566,13 +566,84 @@ int cgroup_taskset_size(struct cgroup_taskset *tset);
  * Inline functions.
  */
 
+struct cgroup_subsys {
+	struct cgroup_subsys_state *(*css_alloc)(struct cgroup *cgrp);
+	int (*css_online)(struct cgroup *cgrp);
+	void (*css_offline)(struct cgroup *cgrp);
+	void (*css_free)(struct cgroup *cgrp);
+
+	int (*allow_attach)(struct cgroup *cgrp, struct cgroup_taskset *tset);
+	int (*can_attach)(struct cgroup *cgrp, struct cgroup_taskset *tset);
+	void (*cancel_attach)(struct cgroup *cgrp, struct cgroup_taskset *tset);
+	void (*attach)(struct cgroup *cgrp, struct cgroup_taskset *tset);
+	void (*fork)(struct task_struct *task);
+	void (*exit)(struct cgroup *cgrp, struct cgroup *old_cgrp,
+		     struct task_struct *task);
+	void (*bind)(struct cgroup *root);
+
+	int subsys_id;
+	int disabled;
+	int early_init;
+	/*
+	 * True if this subsys uses ID. ID is not available before cgroup_init()
+	 * (not available in early_init time.)
+	 */
+	bool use_id;
+
+	/*
+	 * If %false, this subsystem is properly hierarchical -
+	 * configuration, resource accounting and restriction on a parent
+	 * cgroup cover those of its children.  If %true, hierarchy support
+	 * is broken in some ways - some subsystems ignore hierarchy
+	 * completely while others are only implemented half-way.
+	 *
+	 * It's now disallowed to create nested cgroups if the subsystem is
+	 * broken and cgroup core will emit a warning message on such
+	 * cases.  Eventually, all subsystems will be made properly
+	 * hierarchical and this will go away.
+	 */
+	bool broken_hierarchy;
+	bool warned_broken_hierarchy;
+
+#define MAX_CGROUP_TYPE_NAMELEN 32
+	const char *name;
+
+	/*
+	 * Link to parent, and list entry in parent's children.
+	 * Protected by cgroup_lock()
+	 */
+	struct cgroupfs_root *root;
+	struct list_head sibling;
+	/* used when use_id == true */
+	struct idr idr;
+	spinlock_t id_lock;
+
+	/* list of cftype_sets */
+	struct list_head cftsets;
+
+	/* base cftypes, automatically [de]registered with subsys itself */
+	struct cftype *base_cftypes;
+	struct cftype_set base_cftset;
+
+	/* should be defined only by modular subsystems */
+	struct module *module;
+};
+
+#define SUBSYS(_x) extern struct cgroup_subsys _x ## _subsys;
+#define IS_SUBSYS_ENABLED(option) IS_BUILTIN(option)
+#include <linux/cgroup_subsys.h>
+#undef IS_SUBSYS_ENABLED
+#undef SUBSYS
+
 /**
- * css_get - obtain a reference on the specified css
- * @css: target css
+ * cgroup_css - obtain a cgroup's css for the specified subsystem
+ * @cgrp: the cgroup of interest
+ * @subsys_id: the subsystem of interest
  *
- * The caller must already have a reference.
+ * Return @cgrp's css (cgroup_subsys_state) associated with @subsys_id.
  */
-static inline void css_get(struct cgroup_subsys_state *css)
+static inline struct cgroup_subsys_state *cgroup_css(struct cgroup *cgrp,
+						     int subsys_id)
 {
 	if (!(css->flags & CSS_NO_REF))
 		percpu_ref_get(&css->refcnt);
@@ -700,6 +771,12 @@ static inline struct cgroup_subsys_state *task_css(struct task_struct *task,
 						   int subsys_id)
 {
 	return task_css_check(task, subsys_id, false);
+}
+
+static inline struct cgroup *task_cgroup(struct task_struct *task,
+					 int subsys_id)
+{
+	return task_css(task, subsys_id)->cgroup;
 }
 
 struct cgroup *cgroup_next_sibling(struct cgroup *pos);

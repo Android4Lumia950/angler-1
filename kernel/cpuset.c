@@ -114,13 +114,15 @@ struct cpuset {
 
 static inline struct cpuset *css_cs(struct cgroup_subsys_state *css)
 {
-	return css ? container_of(css, struct cpuset, css) : NULL;
+	return container_of(cgroup_css(cgrp, cpuset_subsys_id),
+			    struct cpuset, css);
 }
 
 /* Retrieve the cpuset for a task */
 static inline struct cpuset *task_cs(struct task_struct *task)
 {
-	return css_cs(task_css(task, cpuset_cgrp_id));
+	return container_of(task_css(task, cpuset_subsys_id),
+			    struct cpuset, css);
 }
 
 static inline struct cpuset *parent_cs(struct cpuset *cs)
@@ -2692,8 +2694,8 @@ int proc_cpuset_show(struct seq_file *m, void *unused_v)
 
 	retval = -ENAMETOOLONG;
 	rcu_read_lock();
-	css = task_css(tsk, cpuset_cgrp_id);
-	retval = cgroup_path(css->cgroup, buf, PATH_MAX);
+	css = task_css(tsk, cpuset_subsys_id);
+	retval = cgroup_path(css->cgroup, buf, PAGE_SIZE);
 	rcu_read_unlock();
 	if (retval >= PATH_MAX)
 		goto out_put_task;

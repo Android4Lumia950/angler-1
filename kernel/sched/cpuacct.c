@@ -35,13 +35,20 @@ struct cpuacct {
 
 static inline struct cpuacct *css_ca(struct cgroup_subsys_state *css)
 {
-	return css ? container_of(css, struct cpuacct, css) : NULL;
+	return container_of(cgroup_css(cgrp, cpuacct_subsys_id),
+			    struct cpuacct, css);
 }
 
 /* return cpu accounting group to which this task belongs */
 static inline struct cpuacct *task_ca(struct task_struct *tsk)
 {
-	return css_ca(task_css(tsk, cpuacct_cgrp_id));
+	return container_of(task_css(tsk, cpuacct_subsys_id),
+			    struct cpuacct, css);
+}
+
+static inline struct cpuacct *__parent_ca(struct cpuacct *ca)
+{
+	return cgroup_ca(ca->css.cgroup->parent);
 }
 
 static inline struct cpuacct *parent_ca(struct cpuacct *ca)

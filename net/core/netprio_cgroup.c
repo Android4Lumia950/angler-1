@@ -33,7 +33,11 @@
  */
 #define NETPRIO_ID_MAX		USHRT_MAX
 
-#define PRIOMAP_MIN_SZ		128
+static inline struct cgroup_netprio_state *cgrp_netprio_state(struct cgroup *cgrp)
+{
+	return container_of(cgroup_css(cgrp, net_prio_subsys_id),
+			    struct cgroup_netprio_state, css);
+}
 
 /*
  * Extend @dev->priomap so that it's large enough to accomodate
