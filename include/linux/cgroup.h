@@ -50,11 +50,13 @@ extern struct css_set init_css_set;
 #include <linux/cgroup_subsys.h>
 #undef SUBSYS
 
-#define SUBSYS(_x)								\
-	extern struct static_key_true _x ## _cgrp_subsys_enabled_key;		\
-	extern struct static_key_true _x ## _cgrp_subsys_on_dfl_key;
-#include <linux/cgroup_subsys.h>
-#undef SUBSYS
+/* Per-subsystem/per-cgroup state maintained by the system. */
+struct cgroup_subsys_state {
+	/* the cgroup that this css is attached to */
+	struct cgroup *cgroup;
+
+	/* the cgroup subsystem that this css is attached to */
+	struct cgroup_subsys *ss;
 
 	/* reference count - access via css_[try]get() and css_put() */
 	struct percpu_ref refcnt;
