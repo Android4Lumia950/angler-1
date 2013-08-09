@@ -1145,7 +1145,14 @@ static struct mem_cgroup *__mem_cgroup_iter_next(struct mem_cgroup *root,
 {
 	struct cgroup_subsys_state *prev_css, *next_css;
 
-	prev_css = last_visited ? &last_visited->css : NULL;
+	/*
+	 * Root is not visited by cgroup iterators so it needs an
+	 * explicit visit.
+	 */
+	if (!last_visited)
+		return root;
+
+	prev_css = (last_visited == root) ? NULL : &last_visited->css;
 skip_node:
 	next_css = css_next_descendant_pre(prev_css, &root->css);
 
@@ -1159,7 +1166,7 @@ skip_node:
 	if (next_css) {
 		struct mem_cgroup *mem = mem_cgroup_from_css(next_css);
 
-		if (css_tryget_online(&mem->css))
+		if (css_tryget(&mem->css))
 			return mem;
 		else {
 			prev_css = next_css;

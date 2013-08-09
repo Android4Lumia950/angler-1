@@ -865,72 +865,82 @@ static inline struct cgroup *cgroup_from_id(struct cgroup_subsys *ss, int id)
 	return idr_find(&ss->root->cgroup_idr, id);
 }
 
-struct cgroup *cgroup_next_child(struct cgroup *pos, struct cgroup *cgrp);
+struct cgroup_subsys_state *css_next_child(struct cgroup_subsys_state *pos,
+					   struct cgroup_subsys_state *parent);
 
 /**
- * cgroup_for_each_child - iterate through children of a cgroup
- * @pos: the cgroup * to use as the loop cursor
- * @cgrp: cgroup whose children to walk
+ * css_for_each_child - iterate through children of a css
+ * @pos: the css * to use as the loop cursor
+ * @parent: css whose children to walk
  *
- * Walk @cgrp's children.  Must be called under rcu_read_lock().  A child
- * cgroup which hasn't finished ->css_online() or already has finished
+ * Walk @parent's children.  Must be called under rcu_read_lock().  A child
+ * css which hasn't finished ->css_online() or already has finished
  * ->css_offline() may show up during traversal and it's each subsystem's
  * responsibility to verify that each @pos is alive.
  *
  * If a subsystem synchronizes against the parent in its ->css_online() and
- * before starting iterating, a cgroup which finished ->css_online() is
+ * before starting iterating, a css which finished ->css_online() is
  * guaranteed to be visible in the future iterations.
  *
  * It is allowed to temporarily drop RCU read lock during iteration.  The
  * caller is responsible for ensuring that @pos remains accessible until
  * the start of the next iteration by, for example, bumping the css refcnt.
  */
-#define cgroup_for_each_child(pos, cgrp)				\
-	for ((pos) = cgroup_next_child(NULL, (cgrp)); (pos);		\
-	     (pos) = cgroup_next_child((pos), (cgrp)))
+#define css_for_each_child(pos, parent)					\
+	for ((pos) = css_next_child(NULL, (parent)); (pos);		\
+	     (pos) = css_next_child((pos), (parent)))
 
-static inline struct cgroup *task_cgroup(struct task_struct *task,
-					 int subsys_id)
-{
-	return task_css(task, subsys_id)->cgroup;
-}
+struct cgroup_subsys_state *
+css_next_descendant_pre(struct cgroup_subsys_state *pos,
+			struct cgroup_subsys_state *css);
 
-static inline struct cgroup *task_dfl_cgroup(struct task_struct *task)
-{
-	return task_css_set(task)->dfl_cgrp;
-}
-
-static inline struct cgroup *cgroup_parent(struct cgroup *cgrp)
-{
-	struct cgroup_subsys_state *parent_css = cgrp->self.parent;
-
-	if (parent_css)
-		return container_of(parent_css, struct cgroup, self);
-	return NULL;
-}
+struct cgroup_subsys_state *
+css_rightmost_descendant(struct cgroup_subsys_state *pos);
 
 /**
- * cgroup_on_dfl - test whether a cgroup is on the default hierarchy
- * @cgrp: the cgroup of interest
+ * css_for_each_descendant_pre - pre-order walk of a css's descendants
+ * @pos: the css * to use as the loop cursor
+ * @root: css whose descendants to walk
  *
- * The default hierarchy is the v2 interface of cgroup and this function
- * can be used to test whether a cgroup is on the default hierarchy for
- * cases where a subsystem should behave differnetly depending on the
- * interface version.
+ * Walk @root's descendants.  Must be called under rcu_read_lock().  A
+ * descendant css which hasn't finished ->css_online() or already has
+ * finished ->css_offline() may show up during traversal and it's each
+ * subsystem's responsibility to verify that each @pos is alive.
  *
- * The set of behaviors which change on the default hierarchy are still
- * being determined and the mount option is prefixed with __DEVEL__.
+ * If a subsystem synchronizes against the parent in its ->css_online() and
+ * before starting iterating, and synchronizes against @pos on each
+ * iteration, any descendant css which finished ->css_online() is
+ * guaranteed to be visible in the future iterations.
  *
  * List of changed behaviors:
  *
- * - Mount options "noprefix", "xattr", "clone_children", "release_agent"
- *   and "name" are disallowed.
+ * my_online(@css)
+ * {
+ *	Lock @css's parent and @css;
+ *	Inherit state from the parent;
+ *	Unlock both.
+ * }
  *
- * - When mounting an existing superblock, mount options should match.
+ * my_update_state(@css)
+ * {
+ *	Lock @css;
+ *	Update @css's state;
+ *	Unlock @css;
  *
- * - Remount is disallowed.
+ *	css_for_each_descendant_pre(@pos, @css) {
+ *		Lock @pos;
+ *		Verify @pos is alive and inherit state from @pos's parent;
+ *		Unlock @pos;
+ *	}
+ * }
  *
- * - rename(2) is disallowed.
+ * As long as the inheriting step, including checking the parent state, is
+ * enclosed inside @pos locking, double-locking the parent isn't necessary
+ * while inheriting.  The state update to the parent is guaranteed to be
+ * visible by walking order and, as long as inheriting operations to the
+ * same @pos are atomic to each other, multiple updates racing each other
+ * still result in the correct state.  It's guaranateed that at least one
+ * inheritance happens for any css after the latest update to its parent.
  *
  * - "tasks" is removed.  Everything should be at process granularity.  Use
  *   "cgroup.procs" instead.
@@ -943,40 +953,26 @@ static inline struct cgroup *cgroup_parent(struct cgroup *cgrp)
  * caller is responsible for ensuring that @pos remains accessible until
  * the start of the next iteration by, for example, bumping the css refcnt.
  */
-static inline bool cgroup_on_dfl(const struct cgroup *cgrp)
-{
-	return cgrp->root == &cgrp_dfl_root;
-}
-/*
- * cgroup_is_descendant - test ancestry
- * @cgrp: the cgroup to be tested
- * @ancestor: possible ancestor of @cgrp
- *
- * Test whether @cgrp is a descendant of @ancestor.  It also returns %true
- * if @cgrp == @ancestor.  This function is safe to call as long as @cgrp
- * and @ancestor are accessible.
- */
-static inline bool cgroup_is_descendant(struct cgroup *cgrp,
-					struct cgroup *ancestor)
-{
-	if (cgrp->root != ancestor->root || cgrp->level < ancestor->level)
-		return false;
-	return cgrp->ancestor_ids[ancestor->level] == ancestor->id;
-}
+#define css_for_each_descendant_pre(pos, css)				\
+	for ((pos) = css_next_descendant_pre(NULL, (css)); (pos);	\
+	     (pos) = css_next_descendant_pre((pos), (css)))
+
+struct cgroup_subsys_state *
+css_next_descendant_post(struct cgroup_subsys_state *pos,
+			 struct cgroup_subsys_state *css);
 
 /**
- * task_under_cgroup_hierarchy - test task's membership of cgroup ancestry
- * @task: the task to be tested
- * @ancestor: possible ancestor of @task's cgroup
+ * css_for_each_descendant_post - post-order walk of a css's descendants
+ * @pos: the css * to use as the loop cursor
+ * @css: css whose descendants to walk
  *
- * Tests whether @task's default cgroup hierarchy is a descendant of @ancestor.
- * It follows all the same rules as cgroup_is_descendant, and only applies
- * to the default hierarchy.
+ * Similar to css_for_each_descendant_pre() but performs post-order
+ * traversal instead.  Note that the walk visibility guarantee described in
+ * pre-order walk doesn't apply the same to post-order walks.
  */
-static inline bool task_under_cgroup_hierarchy(struct task_struct *task,
-					       struct cgroup *ancestor)
-{
-	struct css_set *cset = task_css_set(task);
+#define css_for_each_descendant_post(pos, css)				\
+	for ((pos) = css_next_descendant_post(NULL, (css)); (pos);	\
+	     (pos) = css_next_descendant_post((pos), (css)))
 
 /* A cgroup_iter should be treated as an opaque object */
 struct cgroup_iter {
