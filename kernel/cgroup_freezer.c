@@ -270,7 +270,7 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 {
 	struct freezer *freezer = css_freezer(css);
 	struct cgroup_subsys_state *pos;
-	struct cgroup_iter it;
+	struct cgroup_task_iter it;
 	struct task_struct *task;
 
 	lockdep_assert_held(&freezer_mutex);
@@ -292,9 +292,9 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 	rcu_read_unlock();
 
 	/* are all tasks frozen? */
-	cgroup_iter_start(css->cgroup, &it);
+	cgroup_task_iter_start(css->cgroup, &it);
 
-	while ((task = cgroup_iter_next(css->cgroup, &it))) {
+	while ((task = cgroup_task_iter_next(css->cgroup, &it))) {
 		if (freezing(task)) {
 			/*
 			 * freezer_should_skip() indicates that the task
@@ -309,7 +309,7 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 
 	freezer->state |= CGROUP_FROZEN;
 out_iter_end:
-	cgroup_iter_end(css->cgroup, &it);
+	cgroup_task_iter_end(css->cgroup, &it);
 out_unlock:
 	spin_unlock_irq(&freezer->lock);
 }
@@ -337,24 +337,26 @@ static int freezer_read(struct cgroup_subsys_state *css, struct cftype *cft,
 
 static void freeze_cgroup(struct freezer *freezer)
 {
-	struct css_task_iter it;
+	struct cgroup *cgroup = freezer->css.cgroup;
+	struct cgroup_task_iter it;
 	struct task_struct *task;
 
-	css_task_iter_start(&freezer->css, &it);
-	while ((task = css_task_iter_next(&it)))
+	cgroup_task_iter_start(cgroup, &it);
+	while ((task = cgroup_task_iter_next(cgroup, &it)))
 		freeze_task(task);
-	css_task_iter_end(&it);
+	cgroup_task_iter_end(cgroup, &it);
 }
 
 static void unfreeze_cgroup(struct freezer *freezer)
 {
-	struct css_task_iter it;
+	struct cgroup *cgroup = freezer->css.cgroup;
+	struct cgroup_task_iter it;
 	struct task_struct *task;
 
-	css_task_iter_start(&freezer->css, &it);
-	while ((task = css_task_iter_next(&it)))
+	cgroup_task_iter_start(cgroup, &it);
+	while ((task = cgroup_task_iter_next(cgroup, &it)))
 		__thaw_task(task);
-	css_task_iter_end(&it);
+	cgroup_task_iter_end(cgroup, &it);
 }
 
 /**

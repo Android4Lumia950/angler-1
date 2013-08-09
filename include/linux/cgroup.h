@@ -974,15 +974,31 @@ css_next_descendant_post(struct cgroup_subsys_state *pos,
 	for ((pos) = css_next_descendant_post(NULL, (css)); (pos);	\
 	     (pos) = css_next_descendant_post((pos), (css)))
 
-/* A cgroup_iter should be treated as an opaque object */
-struct cgroup_iter {
-	struct list_head *cset_link;
-	struct list_head *task;
+/* A cgroup_task_iter should be treated as an opaque object */
+struct cgroup_task_iter {
+	struct list_head		*cset_link;
+	struct list_head		*task;
 };
 
+void cgroup_task_iter_start(struct cgroup *cgrp, struct cgroup_task_iter *it);
+struct task_struct *cgroup_task_iter_next(struct cgroup *cgrp,
+					  struct cgroup_task_iter *it);
+void cgroup_task_iter_end(struct cgroup *cgrp, struct cgroup_task_iter *it);
+int cgroup_scan_tasks(struct cgroup_scanner *scan);
+int cgroup_attach_task_all(struct task_struct *from, struct task_struct *);
+int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from);
+
 /*
- * Name / path handling functions.  All are thin wrappers around the kernfs
- * counterparts and can be called under any context.
+ * CSS ID is ID for cgroup_subsys_state structs under subsys. This only works
+ * if cgroup_subsys.use_id == true. It can be used for looking up and scanning.
+ * CSS ID is assigned at cgroup allocation (create) automatically
+ * and removed when subsys calls free_css_id() function. This is because
+ * the lifetime of cgroup_subsys_state is subsys's matter.
+ *
+ * Looking up and scanning function should be called under rcu_read_lock().
+ * Taking cgroup_mutex is not necessary for following calls.
+ * But the css returned by this routine can be "not populated yet" or "being
+ * destroyed". The caller should check css and cgroup's status.
  */
 
 static inline int cgroup_name(struct cgroup *cgrp, char *buf, size_t buflen)
