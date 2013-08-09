@@ -76,11 +76,7 @@ static struct vmpressure *work_to_vmpressure(struct work_struct *work)
 	return container_of(work, struct vmpressure, work);
 }
 
-static struct vmpressure *cg_to_vmpressure(struct cgroup *cg)
-{
-	return css_to_vmpressure(cgroup_css(cg, mem_cgroup_subsys_id));
-}
-
+#ifdef CONFIG_MEMCG
 static struct vmpressure *vmpressure_parent(struct vmpressure *vmpr)
 {
 	struct cgroup_subsys_state *css = vmpressure_to_css(vmpr);
@@ -350,6 +346,7 @@ void vmpressure_update_mem_limit(struct mem_cgroup *memcg,
 /**
  * vmpressure_register_event() - Bind vmpressure notifications to an eventfd
  * @css:	css that is interested in vmpressure notifications
+ * @cft:	cgroup control files handle
  * @eventfd:	eventfd context to link notifications with
  * @args:	event arguments (used to set up a pressure level threshold)
  *
@@ -362,7 +359,8 @@ void vmpressure_update_mem_limit(struct mem_cgroup *memcg,
  * To be used as memcg event method.
  */
 int vmpressure_register_event(struct cgroup_subsys_state *css,
-			      struct eventfd_ctx *eventfd, const char *args)
+			      struct cftype *cft, struct eventfd_ctx *eventfd,
+			      const char *args)
 {
 	struct vmpressure *vmpr = css_to_vmpressure(css);
 	struct vmpressure_event *ev;
@@ -393,6 +391,7 @@ int vmpressure_register_event(struct cgroup_subsys_state *css,
 /**
  * vmpressure_unregister_event() - Unbind eventfd from vmpressure
  * @css:	css handle
+ * @cft:	cgroup control files handle
  * @eventfd:	eventfd context that was used to link vmpressure with the @cg
  *
  * This function does internal manipulations to detach the @eventfd from
@@ -402,6 +401,7 @@ int vmpressure_register_event(struct cgroup_subsys_state *css,
  * To be used as memcg event method.
  */
 void vmpressure_unregister_event(struct cgroup_subsys_state *css,
+				 struct cftype *cft,
 				 struct eventfd_ctx *eventfd)
 {
 	struct vmpressure *vmpr = css_to_vmpressure(css);
