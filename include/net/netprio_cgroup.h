@@ -25,6 +25,10 @@ struct netprio_map {
 	u32 priomap[];
 };
 
+extern void sock_update_netprioidx(struct sock *sk);
+
+#if IS_BUILTIN(CONFIG_NETPRIO_CGROUP)
+
 static inline u32 task_netprioidx(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css;

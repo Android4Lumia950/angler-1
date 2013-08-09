@@ -33,12 +33,6 @@
  */
 #define NETPRIO_ID_MAX		USHRT_MAX
 
-static inline struct cgroup_netprio_state *cgrp_netprio_state(struct cgroup *cgrp)
-{
-	return container_of(cgroup_css(cgrp, net_prio_subsys_id),
-			    struct cgroup_netprio_state, css);
-}
-
 /*
  * Extend @dev->priomap so that it's large enough to accomodate
  * @target_idx.  @dev->priomap.priomap_len > @target_idx after successful
@@ -150,15 +144,14 @@ cgrp_css_alloc(struct cgroup_subsys_state *parent_css)
 
 static int cgrp_css_online(struct cgroup_subsys_state *css)
 {
-	struct cgroup_subsys_state *parent_css = css->parent;
+	struct cgroup_subsys_state *css = cgroup_css(cgrp, net_prio_subsys_id);
+	struct cgroup_subsys_state *parent_css;
 	struct net_device *dev;
 	int ret = 0;
 
-	if (css->id > NETPRIO_ID_MAX)
-		return -ENOSPC;
-
-	if (!parent_css)
+	if (!cgrp->parent)
 		return 0;
+	parent_css = cgroup_css(cgrp->parent, net_prio_subsys_id);
 
 	rtnl_lock();
 	/*
@@ -178,7 +171,7 @@ static int cgrp_css_online(struct cgroup_subsys_state *css)
 
 static void cgrp_css_free(struct cgroup_subsys_state *css)
 {
-	kfree(css);
+	kfree(cgroup_css(cgrp, net_prio_subsys_id));
 }
 
 static u64 read_prioidx(struct cgroup_subsys_state *css, struct cftype *cft)
@@ -188,12 +181,12 @@ static u64 read_prioidx(struct cgroup_subsys_state *css, struct cftype *cft)
 
 static int read_priomap(struct seq_file *sf, void *v)
 {
+	struct cgroup_subsys_state *css = cgroup_css(cont, net_prio_subsys_id);
 	struct net_device *dev;
 
 	rcu_read_lock();
 	for_each_netdev_rcu(&init_net, dev)
-		seq_printf(sf, "%s %u\n", dev->name,
-			   netprio_prio(seq_css(sf), dev));
+		cb->fill(cb, dev->name, netprio_prio(css, dev));
 	rcu_read_unlock();
 	return 0;
 }
@@ -201,6 +194,7 @@ static int read_priomap(struct seq_file *sf, void *v)
 static ssize_t write_priomap(struct kernfs_open_file *of,
 			     char *buf, size_t nbytes, loff_t off)
 {
+	struct cgroup_subsys_state *css = cgroup_css(cgrp, net_prio_subsys_id);
 	char devname[IFNAMSIZ + 1];
 	struct net_device *dev;
 	u32 prio;
@@ -217,7 +211,7 @@ static ssize_t write_priomap(struct kernfs_open_file *of,
 
 	rtnl_lock();
 
-	ret = netprio_set_prio(of_css(of), dev, prio);
+	ret = netprio_set_prio(css, dev, prio);
 
 	rtnl_unlock();
 	dev_put(dev);
