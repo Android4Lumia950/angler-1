@@ -75,7 +75,7 @@ static void cgrp_attach(struct cgroup_subsys_state *css,
 	struct cgroup_cls_state *cs = css_cls_state(css);
 	void *v = (void *)(unsigned long)cs->classid;
 
-	cgroup_taskset_for_each(p, css->cgroup, tset) {
+	cgroup_taskset_for_each(p, css, tset) {
 		task_lock(p);
 		iterate_fd(p->files, 0, update_classid, v);
 		task_unlock(p);

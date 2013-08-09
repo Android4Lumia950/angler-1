@@ -556,13 +556,14 @@ int cgroup_task_count(const struct cgroup *cgrp);
 struct cgroup_taskset;
 struct task_struct *cgroup_taskset_first(struct cgroup_taskset *tset);
 struct task_struct *cgroup_taskset_next(struct cgroup_taskset *tset);
-struct cgroup *cgroup_taskset_cur_cgroup(struct cgroup_taskset *tset);
+struct cgroup_subsys_state *cgroup_taskset_cur_css(struct cgroup_taskset *tset,
+						   int subsys_id);
 int cgroup_taskset_size(struct cgroup_taskset *tset);
 
 /**
  * cgroup_taskset_for_each - iterate cgroup_taskset
  * @task: the loop cursor
- * @dst_css: the destination css
+ * @skip_css: skip if task's css matches this, %NULL to iterate through all
  * @tset: taskset to iterate
  *
  * @tset may contain multiple tasks and they may belong to multiple
@@ -577,27 +578,12 @@ int cgroup_taskset_size(struct cgroup_taskset *tset);
  *
  * Iteration is not in any specific order.
  */
-#define cgroup_taskset_for_each(task, dst_css, tset)			\
-	for ((task) = cgroup_taskset_first((tset), &(dst_css));		\
-	     (task);							\
-	     (task) = cgroup_taskset_next((tset), &(dst_css)))
-
-/**
- * cgroup_taskset_for_each_leader - iterate group leaders in a cgroup_taskset
- * @leader: the loop cursor
- * @dst_css: the destination css
- * @tset: takset to iterate
- *
- * Iterate threadgroup leaders of @tset.  For single-task migrations, @tset
- * may not contain any.
- */
-#define cgroup_taskset_for_each_leader(leader, dst_css, tset)		\
-	for ((leader) = cgroup_taskset_first((tset), &(dst_css));	\
-	     (leader);							\
-	     (leader) = cgroup_taskset_next((tset), &(dst_css)))	\
-		if ((leader) != (leader)->group_leader)			\
-			;						\
-		else
+#define cgroup_taskset_for_each(task, skip_css, tset)			\
+	for ((task) = cgroup_taskset_first((tset)); (task);		\
+	     (task) = cgroup_taskset_next((tset)))			\
+		if (!(skip_css) ||					\
+		    cgroup_taskset_cur_css((tset),			\
+			(skip_css)->ss->subsys_id) != (skip_css))
 
 /*
  * Inline functions.
