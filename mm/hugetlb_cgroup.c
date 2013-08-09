@@ -58,7 +58,11 @@ static inline bool hugetlb_cgroup_is_root(struct hugetlb_cgroup *h_cg)
 static inline struct hugetlb_cgroup *
 parent_hugetlb_cgroup(struct hugetlb_cgroup *h_cg)
 {
-	return hugetlb_cgroup_from_css(h_cg->css.parent);
+	struct cgroup *parent = h_cg->css.cgroup->parent;
+
+	if (!parent)
+		return NULL;
+	return hugetlb_cgroup_from_cgroup(parent);
 }
 
 static inline bool hugetlb_cgroup_have_usage(struct hugetlb_cgroup *h_cg)
@@ -150,7 +154,7 @@ out:
  */
 static void hugetlb_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
-	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
+	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_cgroup(cgroup);
 	struct hstate *h;
 	struct page *page;
 	int idx = 0;
