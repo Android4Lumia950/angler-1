@@ -1095,7 +1095,7 @@ static void memcg_check_events(struct mem_cgroup *memcg, struct page *page)
 		preempt_enable();
 }
 
-struct mem_cgroup *mem_cgroup_from_cont(struct cgroup *cont)
+static inline struct mem_cgroup *mem_cgroup_from_cont(struct cgroup *cont)
 {
 	return mem_cgroup_from_css(cgroup_css(cont, mem_cgroup_subsys_id));
 }
@@ -2962,9 +2962,10 @@ static struct kmem_cache *memcg_params_to_cache(struct memcg_cache_params *p)
 }
 
 #ifdef CONFIG_SLABINFO
-static int mem_cgroup_slabinfo_read(struct seq_file *m, void *v)
+static int mem_cgroup_slabinfo_read(struct cgroup_subsys_state *css,
+				    struct cftype *cft, struct seq_file *m)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct memcg_cache_params *params;
 
 	if (!memcg_can_account_kmem(memcg))
@@ -5006,11 +5007,10 @@ static int mem_cgroup_force_empty(struct mem_cgroup *memcg)
 	return 0;
 }
 
-static ssize_t mem_cgroup_force_empty_write(struct kernfs_open_file *of,
-					    char *buf, size_t nbytes,
-					    loff_t off)
+static int mem_cgroup_force_empty_write(struct cgroup_subsys_state *css,
+					unsigned int event)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	int ret;
 
 	if (mem_cgroup_is_root(memcg))
@@ -5033,7 +5033,7 @@ static int mem_cgroup_hierarchy_write(struct cgroup_subsys_state *css,
 				      struct cftype *cft, u64 val)
 {
 	int retval = 0;
-	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct mem_cgroup *parent_memcg = mem_cgroup_from_css(css_parent(&memcg->css));
 
 	mutex_lock(&memcg_create_mutex);
@@ -5104,10 +5104,12 @@ static inline u64 mem_cgroup_usage(struct mem_cgroup *memcg, bool swap)
 	return val << PAGE_SHIFT;
 }
 
-static u64 mem_cgroup_read_u64(struct cgroup_subsys_state *css,
-				   struct cftype *cft)
+static ssize_t mem_cgroup_read(struct cgroup_subsys_state *css,
+			       struct cftype *cft, struct file *file,
+			       char __user *buf, size_t nbytes, loff_t *ppos)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	char str[64];
 	u64 val;
 	int name;
 	enum res_type type;
@@ -5158,7 +5160,7 @@ static int memcg_update_kmem_limit(struct cgroup_subsys_state *css, u64 val)
 	mutex_lock(&memcg_create_mutex);
 	mutex_lock(&set_limit_mutex);
 	if (!memcg->kmem_account_flags && val != RESOURCE_MAX) {
-		if (cgroup_is_populated(css->cgroup) || memcg_has_children(memcg)) {
+		if (cgroup_task_count(css->cgroup) || memcg_has_children(memcg)) {
 			ret = -EBUSY;
 			goto out;
 		}
@@ -5228,10 +5230,9 @@ out:
  * The user of this function is...
  * RES_LIMIT.
  */
-static ssize_t mem_cgroup_write(struct kernfs_open_file *of,
-				char *buf, size_t nbytes, loff_t off)
+static int mem_cgroup_write(struct cgroup_subsys_state *css, struct cftype *cft,
+			    const char *buffer)
 {
-	struct cgroup_subsys_state *css = of_css(of);
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	enum res_type type;
 	int name;
@@ -5306,10 +5307,9 @@ out:
 	*memsw_limit = min_memsw_limit;
 }
 
-static ssize_t mem_cgroup_reset(struct kernfs_open_file *of, char *buf,
-				size_t nbytes, loff_t off)
+static int mem_cgroup_reset(struct cgroup_subsys_state *css, unsigned int event)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	int name;
 	enum res_type type;
 
@@ -5375,12 +5375,13 @@ static int mem_cgroup_move_charge_write(struct cgroup_subsys_state *css,
 #endif
 
 #ifdef CONFIG_NUMA
-static int memcg_numa_stat_show(struct seq_file *m, void *v)
+static int memcg_numa_stat_show(struct cgroup_subsys_state *css,
+				struct cftype *cft, struct seq_file *m)
 {
 	int nid;
 	unsigned long total_nr, file_nr, anon_nr, unevictable_nr;
 	unsigned long node_nr;
-	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
 	total_nr = mem_cgroup_nr_lru_pages(memcg, LRU_ALL);
 	seq_printf(m, "total=%lu", total_nr);
@@ -5425,9 +5426,10 @@ static inline void mem_cgroup_lru_names_not_uptodate(void)
 	BUILD_BUG_ON(ARRAY_SIZE(mem_cgroup_lru_names) != NR_LRU_LISTS);
 }
 
-static int memcg_stat_show(struct seq_file *m, void *v)
+static int memcg_stat_show(struct cgroup_subsys_state *css, struct cftype *cft,
+				 struct seq_file *m)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct mem_cgroup *mi;
 	unsigned int i;
 
@@ -5522,7 +5524,7 @@ static u64 mem_cgroup_swappiness_read(struct cgroup_subsys_state *css,
 static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 				       struct cftype *cft, u64 val)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_cont(cgrp);
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
 
 	if (val > 200 || !parent)
@@ -5862,9 +5864,10 @@ static void mem_cgroup_oom_unregister_event(struct cgroup_subsys_state *css,
 	spin_unlock(&memcg_oom_lock);
 }
 
-static int mem_cgroup_oom_control_read(struct seq_file *sf, void *v)
+static int mem_cgroup_oom_control_read(struct cgroup_subsys_state *css,
+	struct cftype *cft,  struct cgroup_map_cb *cb)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(sf));
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
 	seq_printf(sf, "oom_kill_disable %d\n", memcg->oom_kill_disable);
 	seq_printf(sf, "under_oom %d\n", (bool)atomic_read(&memcg->under_oom));
@@ -5874,7 +5877,7 @@ static int mem_cgroup_oom_control_read(struct seq_file *sf, void *v)
 static int mem_cgroup_oom_control_write(struct cgroup_subsys_state *css,
 	struct cftype *cft, u64 val)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_cont(cgrp);
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
 
 	/* cannot set to root cgroup and only 0 and 1 are allowed */

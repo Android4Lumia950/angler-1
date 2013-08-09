@@ -38,12 +38,6 @@ static inline struct cpuacct *css_ca(struct cgroup_subsys_state *css)
 	return css ? container_of(css, struct cpuacct, css) : NULL;
 }
 
-/* return cpu accounting group corresponding to this container */
-static inline struct cpuacct *cgroup_ca(struct cgroup *cgrp)
-{
-	return css_ca(cgroup_css(cgrp, cpuacct_subsys_id));
-}
-
 /* return cpu accounting group to which this task belongs */
 static inline struct cpuacct *task_ca(struct task_struct *tsk)
 {
@@ -169,9 +163,10 @@ out:
 	return err;
 }
 
-static int cpuacct_percpu_seq_show(struct seq_file *m, void *V)
+static int cpuacct_percpu_seq_read(struct cgroup_subsys_state *css,
+				   struct cftype *cft, struct seq_file *m)
 {
-	struct cpuacct *ca = css_ca(seq_css(m));
+	struct cpuacct *ca = css_ca(css);
 	u64 percpu;
 	int i;
 
@@ -188,9 +183,10 @@ static const char * const cpuacct_stat_desc[] = {
 	[CPUACCT_STAT_SYSTEM] = "system",
 };
 
-static int cpuacct_stats_show(struct seq_file *sf, void *v)
+static int cpuacct_stats_show(struct cgroup_subsys_state *css,
+			      struct cftype *cft, struct cgroup_map_cb *cb)
 {
-	struct cpuacct *ca = css_ca(seq_css(sf));
+	struct cpuacct *ca = css_ca(css);
 	int cpu;
 	s64 val = 0;
 

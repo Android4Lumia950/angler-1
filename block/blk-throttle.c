@@ -956,10 +956,13 @@ static u64 tg_prfill_cpu_rwstat(struct seq_file *sf,
 	return __blkg_prfill_rwstat(sf, pd, &rwstat);
 }
 
-static int tg_print_cpu_rwstat(struct seq_file *sf, void *v)
+static int tg_print_cpu_rwstat(struct cgroup_subsys_state *css,
+			       struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), tg_prfill_cpu_rwstat,
-			  &blkcg_policy_throtl, seq_cft(sf)->private, true);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, tg_prfill_cpu_rwstat, &blkcg_policy_throtl,
+			  cft->private, true);
 	return 0;
 }
 
@@ -985,24 +988,26 @@ static u64 tg_prfill_conf_uint(struct seq_file *sf, struct blkg_policy_data *pd,
 	return __blkg_prfill_u64(sf, pd, v);
 }
 
-static int tg_print_conf_u64(struct seq_file *sf, void *v)
+static int tg_print_conf_u64(struct cgroup_subsys_state *css,
+			     struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), tg_prfill_conf_u64,
-			  &blkcg_policy_throtl, seq_cft(sf)->private, false);
+	blkcg_print_blkgs(sf, css_to_blkcg(css), tg_prfill_conf_u64,
+			  &blkcg_policy_throtl, cft->private, false);
 	return 0;
 }
 
-static int tg_print_conf_uint(struct seq_file *sf, void *v)
+static int tg_print_conf_uint(struct cgroup_subsys_state *css,
+			      struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), tg_prfill_conf_uint,
-			  &blkcg_policy_throtl, seq_cft(sf)->private, false);
+	blkcg_print_blkgs(sf, css_to_blkcg(css), tg_prfill_conf_uint,
+			  &blkcg_policy_throtl, cft->private, false);
 	return 0;
 }
 
-static ssize_t tg_set_conf(struct kernfs_open_file *of,
-			   char *buf, size_t nbytes, loff_t off, bool is_u64)
+static int tg_set_conf(struct cgroup_subsys_state *css, struct cftype *cft,
+		       const char *buf, bool is_u64)
 {
-	struct blkcg *blkcg = css_to_blkcg(of_css(of));
+	struct blkcg *blkcg = css_to_blkcg(css);
 	struct blkg_conf_ctx ctx;
 	struct throtl_grp *tg;
 	struct throtl_data *td;
@@ -1032,16 +1037,16 @@ static ssize_t tg_set_conf(struct kernfs_open_file *of,
 	return nbytes;
 }
 
-static ssize_t tg_set_conf_u64(struct kernfs_open_file *of,
-			       char *buf, size_t nbytes, loff_t off)
+static int tg_set_conf_u64(struct cgroup_subsys_state *css, struct cftype *cft,
+			   const char *buf)
 {
-	return tg_set_conf(of, buf, nbytes, off, true);
+	return tg_set_conf(css, cft, buf, true);
 }
 
-static ssize_t tg_set_conf_uint(struct kernfs_open_file *of,
-				char *buf, size_t nbytes, loff_t off)
+static int tg_set_conf_uint(struct cgroup_subsys_state *css, struct cftype *cft,
+			    const char *buf)
 {
-	return tg_set_conf(of, buf, nbytes, off, false);
+	return tg_set_conf(css, cft, buf, false);
 }
 
 static struct cftype throtl_files[] = {

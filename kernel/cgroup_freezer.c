@@ -267,8 +267,8 @@ static void freezer_fork(struct task_struct *task)
 static void update_if_frozen(struct cgroup_subsys_state *css)
 {
 	struct freezer *freezer = css_freezer(css);
-	struct cgroup_subsys_state *pos;
-	struct css_task_iter it;
+	struct cgroup *pos;
+	struct cgroup_iter it;
 	struct task_struct *task;
 
 	lockdep_assert_held(&freezer_mutex);
@@ -278,9 +278,8 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 		return;
 
 	/* are all (live) children frozen? */
-	rcu_read_lock();
-	css_for_each_child(pos, css) {
-		struct freezer *child = css_freezer(pos);
+	cgroup_for_each_child(pos, css->cgroup) {
+		struct freezer *child = cgroup_freezer(pos);
 
 		if ((child->state & CGROUP_FREEZER_ONLINE) &&
 		    !(child->state & CGROUP_FROZEN)) {
@@ -291,9 +290,9 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 	rcu_read_unlock();
 
 	/* are all tasks frozen? */
-	css_task_iter_start(css, &it);
+	cgroup_iter_start(css->cgroup, &it);
 
-	while ((task = css_task_iter_next(&it))) {
+	while ((task = cgroup_iter_next(css->cgroup, &it))) {
 		if (freezing(task)) {
 			/*
 			 * freezer_should_skip() indicates that the task
@@ -308,10 +307,13 @@ static void update_if_frozen(struct cgroup_subsys_state *css)
 
 	freezer->state |= CGROUP_FROZEN;
 out_iter_end:
-	css_task_iter_end(&it);
+	cgroup_iter_end(css->cgroup, &it);
+out_unlock:
+	spin_unlock_irq(&freezer->lock);
 }
 
-static int freezer_read(struct seq_file *m, void *v)
+static int freezer_read(struct cgroup_subsys_state *css, struct cftype *cft,
+			struct seq_file *m)
 {
 	struct cgroup_subsys_state *css = seq_css(m), *pos;
 
@@ -319,16 +321,9 @@ static int freezer_read(struct seq_file *m, void *v)
 	rcu_read_lock();
 
 	/* update states bottom-up */
-	css_for_each_descendant_post(pos, css) {
-		if (!css_tryget_online(pos))
-			continue;
-		rcu_read_unlock();
-
-		update_if_frozen(pos);
-
-		rcu_read_lock();
-		css_put(pos);
-	}
+	cgroup_for_each_descendant_post(pos, css->cgroup)
+		update_if_frozen(cgroup_css(pos, freezer_subsys_id));
+	update_if_frozen(css);
 
 	rcu_read_unlock();
 	mutex_unlock(&freezer_mutex);
@@ -439,8 +434,8 @@ static void freezer_change_state(struct freezer *freezer, bool freeze)
 	mutex_unlock(&freezer_mutex);
 }
 
-static ssize_t freezer_write(struct kernfs_open_file *of,
-			     char *buf, size_t nbytes, loff_t off)
+static int freezer_write(struct cgroup_subsys_state *css, struct cftype *cft,
+			 const char *buffer)
 {
 	bool freeze;
 
@@ -453,8 +448,8 @@ static ssize_t freezer_write(struct kernfs_open_file *of,
 	else
 		return -EINVAL;
 
-	freezer_change_state(css_freezer(of_css(of)), freeze);
-	return nbytes;
+	freezer_change_state(css_freezer(css), freeze);
+	return 0;
 }
 
 static u64 freezer_self_freezing_read(struct cgroup_subsys_state *css,

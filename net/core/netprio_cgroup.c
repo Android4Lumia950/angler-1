@@ -177,9 +177,9 @@ static u64 read_prioidx(struct cgroup_subsys_state *css, struct cftype *cft)
 	return css->cgroup->id;
 }
 
-static int read_priomap(struct seq_file *sf, void *v)
+static int read_priomap(struct cgroup_subsys_state *css, struct cftype *cft,
+			struct cgroup_map_cb *cb)
 {
-	struct cgroup_subsys_state *css = cgroup_css(cont, net_prio_subsys_id);
 	struct net_device *dev;
 
 	rcu_read_lock();
@@ -189,10 +189,9 @@ static int read_priomap(struct seq_file *sf, void *v)
 	return 0;
 }
 
-static ssize_t write_priomap(struct kernfs_open_file *of,
-			     char *buf, size_t nbytes, loff_t off)
+static int write_priomap(struct cgroup_subsys_state *css, struct cftype *cft,
+			 const char *buffer)
 {
-	struct cgroup_subsys_state *css = cgroup_css(cgrp, net_prio_subsys_id);
 	char devname[IFNAMSIZ + 1];
 	struct net_device *dev;
 	u32 prio;

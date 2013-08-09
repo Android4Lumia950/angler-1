@@ -39,12 +39,6 @@ struct hugetlb_cgroup *hugetlb_cgroup_from_css(struct cgroup_subsys_state *s)
 }
 
 static inline
-struct hugetlb_cgroup *hugetlb_cgroup_from_cgroup(struct cgroup *cgroup)
-{
-	return hugetlb_cgroup_from_css(cgroup_css(cgroup, hugetlb_subsys_id));
-}
-
-static inline
 struct hugetlb_cgroup *hugetlb_cgroup_from_task(struct task_struct *task)
 {
 	return hugetlb_cgroup_from_css(task_css(task, hugetlb_subsys_id));
@@ -247,10 +241,14 @@ void hugetlb_cgroup_uncharge_cgroup(int idx, unsigned long nr_pages,
 	return;
 }
 
-static u64 hugetlb_cgroup_read_u64(struct cgroup_subsys_state *css,
-				   struct cftype *cft)
+static ssize_t hugetlb_cgroup_read(struct cgroup_subsys_state *css,
+				   struct cftype *cft, struct file *file,
+				   char __user *buf, size_t nbytes,
+				   loff_t *ppos)
 {
-	int idx, name;
+	u64 val;
+	char str[64];
+	int idx, name, len;
 	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
 
 	idx = MEMFILE_IDX(cft->private);
@@ -259,12 +257,12 @@ static u64 hugetlb_cgroup_read_u64(struct cgroup_subsys_state *css,
 	return res_counter_read_u64(&h_cg->hugepage[idx], name);
 }
 
-static ssize_t hugetlb_cgroup_write(struct kernfs_open_file *of,
-				    char *buf, size_t nbytes, loff_t off)
+static int hugetlb_cgroup_write(struct cgroup_subsys_state *css,
+				struct cftype *cft, const char *buffer)
 {
 	int idx, name, ret;
 	unsigned long long val;
-	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(of_css(of));
+	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
 
 	buf = strstrip(buf);
 	idx = MEMFILE_IDX(of_cft(of)->private);
@@ -290,11 +288,11 @@ static ssize_t hugetlb_cgroup_write(struct kernfs_open_file *of,
 	return ret ?: nbytes;
 }
 
-static ssize_t hugetlb_cgroup_reset(struct kernfs_open_file *of,
-				    char *buf, size_t nbytes, loff_t off)
+static int hugetlb_cgroup_reset(struct cgroup_subsys_state *css,
+				unsigned int event)
 {
 	int idx, name, ret = 0;
-	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(of_css(of));
+	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
 
 	idx = MEMFILE_IDX(of_cft(of)->private);
 	name = MEMFILE_ATTR(of_cft(of)->private);

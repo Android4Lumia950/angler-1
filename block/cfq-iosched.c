@@ -1612,11 +1612,11 @@ static u64 cfqg_prfill_weight_device(struct seq_file *sf,
 	return __blkg_prfill_u64(sf, pd, cfqg->dev_weight);
 }
 
-static int cfqg_print_weight_device(struct seq_file *sf, void *v)
+static int cfqg_print_weight_device(struct cgroup_subsys_state *css,
+				    struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-			  cfqg_prfill_weight_device, &blkcg_policy_cfq,
-			  0, false);
+	blkcg_print_blkgs(sf, css_to_blkcg(css), cfqg_prfill_weight_device,
+			  &blkcg_policy_cfq, 0, false);
 	return 0;
 }
 
@@ -1630,31 +1630,34 @@ static u64 cfqg_prfill_leaf_weight_device(struct seq_file *sf,
 	return __blkg_prfill_u64(sf, pd, cfqg->dev_leaf_weight);
 }
 
-static int cfqg_print_leaf_weight_device(struct seq_file *sf, void *v)
+static int cfqg_print_leaf_weight_device(struct cgroup_subsys_state *css,
+					 struct cftype *cft,
+					 struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-			  cfqg_prfill_leaf_weight_device, &blkcg_policy_cfq,
-			  0, false);
+	blkcg_print_blkgs(sf, css_to_blkcg(css), cfqg_prfill_leaf_weight_device,
+			  &blkcg_policy_cfq, 0, false);
 	return 0;
 }
 
-static int cfq_print_weight(struct seq_file *sf, void *v)
+static int cfq_print_weight(struct cgroup_subsys_state *css, struct cftype *cft,
+			    struct seq_file *sf)
 {
-	seq_printf(sf, "%u\n", css_to_blkcg(seq_css(sf))->cfq_weight);
+	seq_printf(sf, "%u\n", css_to_blkcg(css)->cfq_weight);
 	return 0;
 }
 
-static int cfq_print_leaf_weight(struct seq_file *sf, void *v)
+static int cfq_print_leaf_weight(struct cgroup_subsys_state *css,
+				 struct cftype *cft, struct seq_file *sf)
 {
-	seq_printf(sf, "%u\n", css_to_blkcg(seq_css(sf))->cfq_leaf_weight);
+	seq_printf(sf, "%u\n", css_to_blkcg(css)->cfq_leaf_weight);
 	return 0;
 }
 
-static ssize_t __cfqg_set_weight_device(struct kernfs_open_file *of,
-					char *buf, size_t nbytes, loff_t off,
-					bool is_leaf_weight)
+static int __cfqg_set_weight_device(struct cgroup_subsys_state *css,
+				    struct cftype *cft, const char *buf,
+				    bool is_leaf_weight)
 {
-	struct blkcg *blkcg = css_to_blkcg(of_css(of));
+	struct blkcg *blkcg = css_to_blkcg(css);
 	struct blkg_conf_ctx ctx;
 	struct cfq_group *cfqg;
 	int ret;
@@ -1680,16 +1683,16 @@ static ssize_t __cfqg_set_weight_device(struct kernfs_open_file *of,
 	return ret ?: nbytes;
 }
 
-static ssize_t cfqg_set_weight_device(struct kernfs_open_file *of,
-				      char *buf, size_t nbytes, loff_t off)
+static int cfqg_set_weight_device(struct cgroup_subsys_state *css,
+				  struct cftype *cft, const char *buf)
 {
-	return __cfqg_set_weight_device(of, buf, nbytes, off, false);
+	return __cfqg_set_weight_device(css, cft, buf, false);
 }
 
-static ssize_t cfqg_set_leaf_weight_device(struct kernfs_open_file *of,
-					   char *buf, size_t nbytes, loff_t off)
+static int cfqg_set_leaf_weight_device(struct cgroup_subsys_state *css,
+				       struct cftype *cft, const char *buf)
 {
-	return __cfqg_set_weight_device(of, buf, nbytes, off, true);
+	return __cfqg_set_weight_device(css, cft, buf, true);
 }
 
 static int __cfq_set_weight(struct cgroup_subsys_state *css, struct cftype *cft,
@@ -1739,17 +1742,23 @@ static int cfq_set_leaf_weight(struct cgroup_subsys_state *css,
 	return __cfq_set_weight(css, cft, val, true);
 }
 
-static int cfqg_print_stat(struct seq_file *sf, void *v)
+static int cfqg_print_stat(struct cgroup_subsys_state *css, struct cftype *cft,
+			   struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_stat,
-			  &blkcg_policy_cfq, seq_cft(sf)->private, false);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, blkg_prfill_stat, &blkcg_policy_cfq,
+			  cft->private, false);
 	return 0;
 }
 
-static int cfqg_print_rwstat(struct seq_file *sf, void *v)
+static int cfqg_print_rwstat(struct cgroup_subsys_state *css,
+			     struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_rwstat,
-			  &blkcg_policy_cfq, seq_cft(sf)->private, true);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, blkg_prfill_rwstat, &blkcg_policy_cfq,
+			  cft->private, true);
 	return 0;
 }
 
@@ -1769,19 +1778,23 @@ static u64 cfqg_prfill_rwstat_recursive(struct seq_file *sf,
 	return __blkg_prfill_rwstat(sf, pd, &sum);
 }
 
-static int cfqg_print_stat_recursive(struct seq_file *sf, void *v)
+static int cfqg_print_stat_recursive(struct cgroup_subsys_state *css,
+				     struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-			  cfqg_prfill_stat_recursive, &blkcg_policy_cfq,
-			  seq_cft(sf)->private, false);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, cfqg_prfill_stat_recursive,
+			  &blkcg_policy_cfq, cft->private, false);
 	return 0;
 }
 
-static int cfqg_print_rwstat_recursive(struct seq_file *sf, void *v)
+static int cfqg_print_rwstat_recursive(struct cgroup_subsys_state *css,
+				       struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-			  cfqg_prfill_rwstat_recursive, &blkcg_policy_cfq,
-			  seq_cft(sf)->private, true);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, cfqg_prfill_rwstat_recursive,
+			  &blkcg_policy_cfq, cft->private, true);
 	return 0;
 }
 
@@ -1802,11 +1815,13 @@ static u64 cfqg_prfill_avg_queue_size(struct seq_file *sf,
 }
 
 /* print avg_queue_size */
-static int cfqg_print_avg_queue_size(struct seq_file *sf, void *v)
+static int cfqg_print_avg_queue_size(struct cgroup_subsys_state *css,
+				     struct cftype *cft, struct seq_file *sf)
 {
-	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-			  cfqg_prfill_avg_queue_size, &blkcg_policy_cfq,
-			  0, false);
+	struct blkcg *blkcg = css_to_blkcg(css);
+
+	blkcg_print_blkgs(sf, blkcg, cfqg_prfill_avg_queue_size,
+			  &blkcg_policy_cfq, 0, false);
 	return 0;
 }
 #endif	/* CONFIG_DEBUG_BLK_CGROUP */

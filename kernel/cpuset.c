@@ -1685,10 +1685,10 @@ out_unlock:
 /*
  * Common handling for a write to a "cpus" or "mems" file.
  */
-static ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
-				    char *buf, size_t nbytes, loff_t off)
+static int cpuset_write_resmask(struct cgroup_subsys_state *css,
+				struct cftype *cft, const char *buf)
 {
-	struct cpuset *cs = css_cs(of_css(of));
+	struct cpuset *cs = css_cs(css);
 	struct cpuset *trialcs;
 	int retval = -ENODEV;
 
@@ -1778,13 +1778,16 @@ static size_t cpuset_sprintf_memlist(char *page, struct cpuset *cs)
 	return count;
 }
 
-static int cpuset_common_seq_show(struct seq_file *sf, void *v)
+static ssize_t cpuset_common_file_read(struct cgroup_subsys_state *css,
+				       struct cftype *cft, struct file *file,
+				       char __user *buf, size_t nbytes,
+				       loff_t *ppos)
 {
-	struct cpuset *cs = css_cs(seq_css(sf));
-	cpuset_filetype_t type = seq_cft(sf)->private;
-	ssize_t count;
-	char *buf, *s;
-	int ret = 0;
+	struct cpuset *cs = css_cs(css);
+	cpuset_filetype_t type = cft->private;
+	char *page;
+	ssize_t retval = 0;
+	char *s;
 
 	count = seq_get_buf(sf, &buf);
 	s = buf;

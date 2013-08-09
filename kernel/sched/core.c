@@ -9746,12 +9746,6 @@ static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
 	return css ? container_of(css, struct task_group, css) : NULL;
 }
 
-/* return corresponding task_group object of a cgroup */
-static inline struct task_group *cgroup_tg(struct cgroup *cgrp)
-{
-	return css_tg(cgroup_css(cgrp, cpu_cgroup_subsys_id));
-}
-
 static struct cgroup_subsys_state *
 cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 {
@@ -9840,7 +9834,7 @@ static void cpu_cgroup_exit(struct cgroup_subsys_state *css,
 	sched_move_task(task);
 }
 
-static u64 cpu_notify_on_migrate_read_u64(struct cgroup *cgrp,
+static u64 cpu_notify_on_migrate_read_u64(struct cgroup_subsys_state *css,
 					  struct cftype *cft)
 {
 	struct task_group *tg = css_tg(css);
@@ -10138,9 +10132,10 @@ static int __cfs_schedulable(struct task_group *tg, u64 period, u64 quota)
 	return ret;
 }
 
-static int cpu_stats_show(struct seq_file *sf, void *v)
+static int cpu_stats_show(struct cgroup_subsys_state *css, struct cftype *cft,
+		struct cgroup_map_cb *cb)
 {
-	struct task_group *tg = css_tg(seq_css(sf));
+	struct task_group *tg = css_tg(css);
 	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
 
 	seq_printf(sf, "nr_periods %d\n", cfs_b->nr_periods);
