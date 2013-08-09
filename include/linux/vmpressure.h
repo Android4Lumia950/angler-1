@@ -63,11 +63,13 @@ extern struct vmpressure *memcg_to_vmpressure(struct mem_cgroup *memcg);
 extern struct cgroup_subsys_state *vmpressure_to_css(struct vmpressure *vmpr);
 extern struct vmpressure *css_to_vmpressure(struct cgroup_subsys_state *css);
 extern void vmpressure_update_mem_limit(struct mem_cgroup *memcg,
-					unsigned long new_limit);
-extern int vmpressure_register_event(struct cgroup *cg, struct cftype *cft,
+	unsigned long new_limit);
+extern int vmpressure_register_event(struct cgroup_subsys_state *css,
+				     struct cftype *cft,
 				     struct eventfd_ctx *eventfd,
 				     const char *args);
-extern void vmpressure_unregister_event(struct cgroup *cg, struct cftype *cft,
+extern void vmpressure_unregister_event(struct cgroup_subsys_state *css,
+					struct cftype *cft,
 					struct eventfd_ctx *eventfd);
 #else
 static inline void vmpressure(gfp_t gfp, struct mem_cgroup *memcg,
