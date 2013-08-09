@@ -1547,7 +1547,7 @@ static unsigned long mem_cgroup_margin(struct mem_cgroup *memcg)
 int mem_cgroup_swappiness(struct mem_cgroup *memcg)
 {
 	/* root ? */
-	if (!memcg->css.parent)
+	if (!css_parent(&memcg->css))
 		return vm_swappiness;
 
 	return memcg->swappiness;
@@ -5033,8 +5033,8 @@ static int mem_cgroup_hierarchy_write(struct cgroup_subsys_state *css,
 				      struct cftype *cft, u64 val)
 {
 	int retval = 0;
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-	struct mem_cgroup *parent_memcg = mem_cgroup_from_css(memcg->css.parent);
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
+	struct mem_cgroup *parent_memcg = mem_cgroup_from_css(css_parent(&memcg->css));
 
 	mutex_lock(&memcg_create_mutex);
 
@@ -5292,8 +5292,8 @@ static void memcg_get_hierarchical_limit(struct mem_cgroup *memcg,
 	if (!memcg->use_hierarchy)
 		goto out;
 
-	while (memcg->css.parent) {
-		memcg = mem_cgroup_from_css(memcg->css.parent);
+	while (css_parent(&memcg->css)) {
+		memcg = mem_cgroup_from_css(css_parent(&memcg->css));
 		if (!memcg->use_hierarchy)
 			break;
 		tmp = res_counter_read_u64(&memcg->res, RES_LIMIT);
@@ -5522,10 +5522,10 @@ static u64 mem_cgroup_swappiness_read(struct cgroup_subsys_state *css,
 static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 				       struct cftype *cft, u64 val)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-	struct mem_cgroup *parent = mem_cgroup_from_css(memcg->css.parent);
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cgrp);
+	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
 
-	if (val > 200)
+	if (val > 200 || !parent)
 		return -EINVAL;
 
 	mutex_lock(&memcg_create_mutex);
@@ -5874,8 +5874,8 @@ static int mem_cgroup_oom_control_read(struct seq_file *sf, void *v)
 static int mem_cgroup_oom_control_write(struct cgroup_subsys_state *css,
 	struct cftype *cft, u64 val)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-	struct mem_cgroup *parent = mem_cgroup_from_css(memcg->css.parent);
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cgrp);
+	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
 
 	/* cannot set to root cgroup and only 0 and 1 are allowed */
 	if (!parent || !((val == 0) || (val == 1)))
@@ -6479,11 +6479,9 @@ free_out:
 static int
 mem_cgroup_css_online(struct cgroup_subsys_state *css)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-	struct mem_cgroup *parent = mem_cgroup_from_css(css->parent);
-
-	if (css->id > MEM_CGROUP_ID_MAX)
-		return -ENOSPC;
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
+	struct mem_cgroup *parent = mem_cgroup_from_css(css_parent(&memcg->css));
+	int error = 0;
 
 	if (!parent)
 		return 0;

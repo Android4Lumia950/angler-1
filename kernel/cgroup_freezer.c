@@ -63,7 +63,7 @@ static inline struct freezer *task_freezer(struct task_struct *task)
 
 static struct freezer *parent_freezer(struct freezer *freezer)
 {
-	return css_freezer(freezer->css.parent);
+	return css_freezer(css_parent(&freezer->css));
 }
 
 bool cgroup_freezing(struct task_struct *task)
@@ -232,8 +232,8 @@ static void freezer_fork(struct task_struct *task)
 	 * to do.  If we lost and root is the new cgroup, noop is still the
 	 * right thing to do.
 	 */
-	if (task_css_is_root(task, freezer_cgrp_id))
-		return;
+	if (!parent_freezer(freezer))
+		goto out;
 
 	mutex_lock(&freezer_mutex);
 	rcu_read_lock();

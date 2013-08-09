@@ -9781,7 +9781,24 @@ cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 
 static void cpu_cgroup_css_released(struct cgroup_subsys_state *css)
 {
-	struct task_group *tg = css_tg(css);
+	struct task_group *tg = cgroup_tg(cgrp);
+	struct task_group *parent = css_tg(css_parent(&tg->css));
+
+	if (parent)
+		sched_online_group(tg, parent);
+	return 0;
+}
+
+static void cpu_cgroup_css_free(struct cgroup *cgrp)
+{
+	struct task_group *tg = cgroup_tg(cgrp);
+
+	sched_destroy_group(tg);
+}
+
+static void cpu_cgroup_css_offline(struct cgroup *cgrp)
+{
+	struct task_group *tg = cgroup_tg(cgrp);
 
 	sched_offline_group(tg);
 }

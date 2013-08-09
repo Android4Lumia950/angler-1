@@ -50,14 +50,9 @@ static inline struct cpuacct *task_ca(struct task_struct *tsk)
 	return css_ca(task_css(tsk, cpuacct_subsys_id));
 }
 
-static inline struct cpuacct *__parent_ca(struct cpuacct *ca)
-{
-	return cgroup_ca(ca->css.cgroup->parent);
-}
-
 static inline struct cpuacct *parent_ca(struct cpuacct *ca)
 {
-	return css_ca(ca->css.parent);
+	return css_ca(css_parent(&ca->css));
 }
 
 static DEFINE_PER_CPU(u64, root_cpuacct_cpuusage);

@@ -198,8 +198,8 @@ static inline bool is_devcg_online(const struct dev_cgroup *devcg)
  */
 static int devcgroup_online(struct cgroup_subsys_state *css)
 {
-	struct dev_cgroup *dev_cgroup = css_to_devcgroup(css);
-	struct dev_cgroup *parent_dev_cgroup = css_to_devcgroup(css->parent);
+	struct dev_cgroup *dev_cgroup = cgroup_to_devcgroup(cgroup);
+	struct dev_cgroup *parent_dev_cgroup = css_to_devcgroup(css_parent(&dev_cgroup->css));
 	int ret = 0;
 
 	mutex_lock(&devcgroup_mutex);
@@ -472,42 +472,11 @@ static bool verify_new_ex(struct dev_cgroup *dev_cgroup,
 static int parent_has_perm(struct dev_cgroup *childcg,
 				  struct dev_exception_item *ex)
 {
-	struct dev_cgroup *parent = css_to_devcgroup(childcg->css.parent);
+	struct dev_cgroup *parent = css_to_devcgroup(css_parent(&childcg->css));
 
 	if (!parent)
 		return 1;
-	return verify_new_ex(parent, ex, childcg->behavior);
-}
-
-/**
- * parent_allows_removal - verify if it's ok to remove an exception
- * @childcg: child cgroup from where the exception will be removed
- * @ex: exception being removed
- *
- * When removing an exception in cgroups with default ALLOW policy, it must
- * be checked if removing it will give the child cgroup more access than the
- * parent.
- *
- * Return: true if it's ok to remove exception, false otherwise
- */
-static bool parent_allows_removal(struct dev_cgroup *childcg,
-				  struct dev_exception_item *ex)
-{
-	struct dev_cgroup *parent = css_to_devcgroup(childcg->css.parent);
-
-	if (!parent)
-		return true;
-
-	/* It's always allowed to remove access to devices */
-	if (childcg->behavior == DEVCG_DEFAULT_DENY)
-		return true;
-
-	/*
-	 * Make sure you're not removing part or a whole exception existing in
-	 * the parent cgroup
-	 */
-	return !match_exception_partial(&parent->exceptions, ex->type,
-					ex->major, ex->minor, ex->access);
+	return may_access(parent, ex, childcg->behavior);
 }
 
 /**
@@ -624,7 +593,7 @@ static int devcgroup_update_access(struct dev_cgroup *devcgroup,
 	char temp[12];		/* 11 + 1 characters needed for a u32 */
 	int count, rc = 0;
 	struct dev_exception_item ex;
-	struct dev_cgroup *parent = css_to_devcgroup(devcgroup->css.parent);
+	struct dev_cgroup *parent = css_to_devcgroup(css_parent(&devcgroup->css));
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
