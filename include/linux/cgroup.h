@@ -61,12 +61,12 @@ struct cgroup_subsys_state {
 	/* reference count - access via css_[try]get() and css_put() */
 	struct percpu_ref refcnt;
 
-bool css_has_online_children(struct cgroup_subsys_state *css);
-struct cgroup_subsys_state *css_from_id(int id, struct cgroup_subsys *ss);
-struct cgroup_subsys_state *cgroup_get_e_css(struct cgroup *cgroup,
-					     struct cgroup_subsys *ss);
-struct cgroup_subsys_state *css_tryget_online_from_dir(struct dentry *dentry,
-						       struct cgroup_subsys *ss);
+	/* the parent css */
+	struct cgroup_subsys_state *parent;
+
+	unsigned long flags;
+	/* ID for this css, if possible */
+	struct css_id __rcu *id;
 
 	/* Used to put @cgroup->dentry on the last css_put() */
 	struct work_struct destroy_work;
@@ -672,15 +672,7 @@ struct cgroup_subsys {
 static inline
 struct cgroup_subsys_state *css_parent(struct cgroup_subsys_state *css)
 {
-	struct cgroup *parent_cgrp = css->cgroup->parent;
-
-	if (!parent_cgrp)
-		return NULL;
-
-	if (css->ss)
-		return parent_cgrp->subsys[css->ss->subsys_id];
-	else
-		return &parent_cgrp->dummy_css;
+	return css->parent;
 }
 
 /**
