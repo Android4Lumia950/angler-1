@@ -68,8 +68,9 @@ struct cgroup_subsys_state *cgroup_get_e_css(struct cgroup *cgroup,
 struct cgroup_subsys_state *css_tryget_online_from_dir(struct dentry *dentry,
 						       struct cgroup_subsys *ss);
 
-struct cgroup *cgroup_get_from_path(const char *path);
-struct cgroup *cgroup_get_from_fd(int fd);
+	/* Used to put @cgroup->dentry on the last css_put() */
+	struct work_struct destroy_work;
+};
 
 int cgroup_attach_task_all(struct task_struct *from, struct task_struct *);
 int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from);
