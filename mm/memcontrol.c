@@ -545,22 +545,20 @@ static inline bool mem_cgroup_is_root(struct mem_cgroup *memcg)
 	return (memcg == root_mem_cgroup);
 }
 
-/*
- * We restrict the id in the range of [1, 65535], so it can fit into
- * an unsigned short.
- */
-#define MEM_CGROUP_ID_MAX	USHRT_MAX
-
 static inline unsigned short mem_cgroup_id(struct mem_cgroup *memcg)
 {
-	return memcg->css.id;
+	/*
+	 * The ID of the root cgroup is 0, but memcg treat 0 as an
+	 * invalid ID, so we return (cgroup_id + 1).
+	 */
+	return memcg->css.cgroup->id + 1;
 }
 
 static inline struct mem_cgroup *mem_cgroup_from_id(unsigned short id)
 {
 	struct cgroup_subsys_state *css;
 
-	css = css_from_id(id, &memory_cgrp_subsys);
+	css = css_from_id(id - 1, &mem_cgroup_subsys);
 	return mem_cgroup_from_css(css);
 }
 
