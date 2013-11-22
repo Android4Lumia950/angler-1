@@ -18,6 +18,24 @@
 
 #ifdef CONFIG_CGROUPS
 
+struct cgroupfs_root;
+struct cgroup_subsys;
+struct inode;
+struct cgroup;
+struct css_id;
+
+extern int cgroup_init_early(void);
+extern int cgroup_init(void);
+extern void cgroup_fork(struct task_struct *p);
+extern void cgroup_post_fork(struct task_struct *p);
+extern void cgroup_exit(struct task_struct *p, int run_callbacks);
+extern int cgroupstats_build(struct cgroupstats *stats,
+				struct dentry *dentry);
+extern int cgroup_load_subsys(struct cgroup_subsys *ss);
+extern void cgroup_unload_subsys(struct cgroup_subsys *ss);
+
+extern int proc_cgroup_show(struct seq_file *, void *);
+
 /*
  * All weight knobs on the default hierarhcy should use the following min,
  * default and max values.  The default value is the logarithmic center of
@@ -221,10 +239,6 @@ struct cgroup {
 	/* For css percpu_ref killing and RCU-protected deletion */
 	struct rcu_head rcu_head;
 	struct work_struct destroy_work;
-
-	/* List of events which userspace want to receive */
-	struct list_head event_list;
-	spinlock_t event_list_lock;
 
 	/* directory xattrs */
 	struct simple_xattrs xattrs;
@@ -499,25 +513,6 @@ struct cftype {
 	int (*trigger)(struct cgroup_subsys_state *css, unsigned int event);
 
 	int (*release)(struct inode *inode, struct file *file);
-
-	/*
-	 * register_event() callback will be used to add new userspace
-	 * waiter for changes related to the cftype. Implement it if
-	 * you want to provide this functionality. Use eventfd_signal()
-	 * on eventfd to send notification to userspace.
-	 */
-	int (*register_event)(struct cgroup_subsys_state *css,
-			      struct cftype *cft, struct eventfd_ctx *eventfd,
-			      const char *args);
-	/*
-	 * unregister_event() callback will be called when userspace
-	 * closes the eventfd or on cgroup removing.
-	 * This callback must be implemented, if you want provide
-	 * notification functionality.
-	 */
-	void (*unregister_event)(struct cgroup_subsys_state *css,
-				 struct cftype *cft,
-				 struct eventfd_ctx *eventfd);
 };
 
 /*

@@ -9,13 +9,6 @@
 #include <linux/cgroup.h>
 #include <linux/eventfd.h>
 
-enum vmpressure_levels {
-	VMPRESSURE_LOW = 0,
-	VMPRESSURE_MEDIUM,
-	VMPRESSURE_CRITICAL,
-	VMPRESSURE_NUM_LEVELS,
-};
-
 struct vmpressure {
 	/*
 	 * The window size is the number of scanned pages before
