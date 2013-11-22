@@ -7,6 +7,7 @@
 #include <linux/gfp.h>
 #include <linux/types.h>
 #include <linux/cgroup.h>
+#include <linux/eventfd.h>
 
 enum vmpressure_levels {
 	VMPRESSURE_LOW = 0,
