@@ -1755,16 +1755,10 @@ static size_t cpuset_sprintf_memlist(char *page, struct cpuset *cs)
 	return count;
 }
 
-static ssize_t cpuset_common_file_read(struct cgroup_subsys_state *css,
-				       struct cftype *cft, struct file *file,
-				       char __user *buf, size_t nbytes,
-				       loff_t *ppos)
-static int cpuset_common_read_seq_string(struct cgroup_subsys_state *css,
-					 struct cftype *cft,
-					 struct seq_file *sf)
+static int cpuset_common_seq_show(struct seq_file *sf, void *v)
 {
-	struct cpuset *cs = css_cs(css);
-	cpuset_filetype_t type = cft->private;
+	struct cpuset *cs = css_cs(seq_css(sf));
+	cpuset_filetype_t type = seq_cft(sf)->private;
 	ssize_t count;
 	char *buf, *s;
 	int ret = 0;
@@ -1851,7 +1845,7 @@ static s64 cpuset_read_s64(struct cgroup_subsys_state *css, struct cftype *cft)
 static struct cftype files[] = {
 	{
 		.name = "cpus",
-		.read_seq_string = cpuset_common_read_seq_string,
+		.seq_show = cpuset_common_seq_show,
 		.write_string = cpuset_write_resmask,
 		.max_write_len = (100U + 6 * NR_CPUS),
 		.private = FILE_CPULIST,
@@ -1859,7 +1853,7 @@ static struct cftype files[] = {
 
 	{
 		.name = "mems",
-		.read_seq_string = cpuset_common_read_seq_string,
+		.seq_show = cpuset_common_seq_show,
 		.write_string = cpuset_write_resmask,
 		.max_write_len = (100U + 6 * MAX_NUMNODES),
 		.private = FILE_MEMLIST,
