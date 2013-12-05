@@ -241,14 +241,10 @@ void hugetlb_cgroup_uncharge_cgroup(int idx, unsigned long nr_pages,
 	return;
 }
 
-static ssize_t hugetlb_cgroup_read(struct cgroup_subsys_state *css,
-				   struct cftype *cft, struct file *file,
-				   char __user *buf, size_t nbytes,
-				   loff_t *ppos)
+static u64 hugetlb_cgroup_read_u64(struct cgroup_subsys_state *css,
+				   struct cftype *cft)
 {
-	u64 val;
-	char str[64];
-	int idx, name, len;
+	int idx, name;
 	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
 
 	idx = MEMFILE_IDX(cft->private);
@@ -336,7 +332,7 @@ static void __init __hugetlb_cgroup_file_init(int idx)
 	snprintf(cft->name, MAX_CFTYPE_NAME, "%s.limit_in_bytes", buf);
 	cft->private = MEMFILE_PRIVATE(idx, RES_LIMIT);
 	cft->read_u64 = hugetlb_cgroup_read_u64;
-	cft->write = hugetlb_cgroup_write;
+	cft->write_string = hugetlb_cgroup_write;
 
 	/* Add the usage file */
 	cft = &h->cgroup_files[1];
@@ -348,14 +344,14 @@ static void __init __hugetlb_cgroup_file_init(int idx)
 	cft = &h->cgroup_files[2];
 	snprintf(cft->name, MAX_CFTYPE_NAME, "%s.max_usage_in_bytes", buf);
 	cft->private = MEMFILE_PRIVATE(idx, RES_MAX_USAGE);
-	cft->write = hugetlb_cgroup_reset;
+	cft->trigger = hugetlb_cgroup_reset;
 	cft->read_u64 = hugetlb_cgroup_read_u64;
 
 	/* Add the failcntfile */
 	cft = &h->cgroup_files[3];
 	snprintf(cft->name, MAX_CFTYPE_NAME, "%s.failcnt", buf);
 	cft->private  = MEMFILE_PRIVATE(idx, RES_FAILCNT);
-	cft->write = hugetlb_cgroup_reset;
+	cft->trigger  = hugetlb_cgroup_reset;
 	cft->read_u64 = hugetlb_cgroup_read_u64;
 
 	/* NULL terminate the last cft */
