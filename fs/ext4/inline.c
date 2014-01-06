@@ -881,6 +881,7 @@ retry_journal:
 							    flags,
 							    fsdata);
 		ext4_journal_stop(handle);
+		handle = NULL;
 		if (ret == -ENOSPC &&
 		    ext4_should_retry_alloc(inode->i_sb, &retries))
 			goto retry_journal;
