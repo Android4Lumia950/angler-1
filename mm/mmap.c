@@ -1658,8 +1658,6 @@ out:
 	return addr;
 
 unmap_and_free_vma:
-	if (vm_flags & VM_DENYWRITE)
-		allow_write_access(file);
 	vma->vm_file = NULL;
 	fput(file);
 
