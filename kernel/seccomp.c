@@ -263,8 +263,7 @@ static long seccomp_attach_filter(struct sock_fprog *fprog)
 	if (!filter)
 		goto free_prog;
 
-	filter->prog = kzalloc(bpf_prog_size(new_len),
-			       GFP_KERNEL|__GFP_NOWARN);
+	filter->prog = bpf_prog_alloc(bpf_prog_size(new_len), __GFP_NOWARN);
 	if (!filter->prog)
 		goto free_filter;
 
@@ -273,7 +272,6 @@ static long seccomp_attach_filter(struct sock_fprog *fprog)
 		goto free_filter_prog;
 
 	kfree(fp);
-
 	atomic_set(&filter->usage, 1);
 	filter->prog->len = new_len;
 
@@ -288,7 +286,7 @@ static long seccomp_attach_filter(struct sock_fprog *fprog)
 	return 0;
 
 free_filter_prog:
-	kfree(filter->prog);
+	__bpf_prog_free(filter->prog);
 
 free_filter:
 	kfree(filter);
