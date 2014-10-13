@@ -192,18 +192,11 @@ static int ext4_init_block_bitmap(struct super_block *sb,
 	/* If checksum is bad mark all blocks used to prevent allocation
 	 * essentially implementing a per-group read-only flag. */
 	if (!ext4_group_desc_csum_verify(sb, block_group, gdp)) {
-		grp = ext4_get_group_info(sb, block_group);
-		if (!EXT4_MB_GRP_BBITMAP_CORRUPT(grp))
-			percpu_counter_sub(&sbi->s_freeclusters_counter,
-					   grp->bb_free);
-		set_bit(EXT4_GROUP_INFO_BBITMAP_CORRUPT_BIT, &grp->bb_state);
-		if (!EXT4_MB_GRP_IBITMAP_CORRUPT(grp)) {
-			int count;
-			count = ext4_free_inodes_count(sb, gdp);
-			percpu_counter_sub(&sbi->s_freeinodes_counter,
-					   count);
-		}
-		set_bit(EXT4_GROUP_INFO_IBITMAP_CORRUPT_BIT, &grp->bb_state);
+		ext4_free_group_clusters_set(sb, gdp, 0);
+		ext4_free_inodes_set(sb, gdp, 0);
+		ext4_itable_unused_set(sb, gdp, 0);
+		memset(bh->b_data, 0xff, sb->s_blocksize);
+		ext4_block_bitmap_csum_set(sb, block_group, gdp, bh);
 		return -EIO;
 	}
 	memset(bh->b_data, 0, sb->s_blocksize);
