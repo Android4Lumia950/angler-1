@@ -39,6 +39,18 @@ static inline int secure_computing(void)
 extern void secure_computing_strict(int this_syscall);
 #endif
 
+#define SECCOMP_PHASE1_OK	0
+#define SECCOMP_PHASE1_SKIP	1
+
+extern u32 seccomp_phase1(struct seccomp_data *sd);
+int seccomp_phase2(u32 phase1_result);
+
+/* A wrapper for architectures supporting only SECCOMP_MODE_STRICT. */
+static inline void secure_computing_strict(int this_syscall)
+{
+	BUG_ON(secure_computing(this_syscall) != 0);
+}
+
 extern long prctl_get_seccomp(void);
 extern long prctl_set_seccomp(unsigned long, char __user *);
 
