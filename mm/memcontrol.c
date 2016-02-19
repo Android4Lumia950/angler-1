@@ -5525,7 +5525,7 @@ static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 	struct mem_cgroup *parent = mem_cgroup_from_css(memcg->css.parent);
 
-	if (val > 200 || !parent)
+	if (val > 200)
 		return -EINVAL;
 
 	mutex_lock(&memcg_create_mutex);
