@@ -148,6 +148,7 @@ static const struct inode_operations ramfs_dir_inode_operations = {
 	.rmdir		= simple_rmdir,
 	.mknod		= ramfs_mknod,
 	.rename	= simple_rename,
+	.rename2	= simple_rename,
 };
 
 static const struct super_operations ramfs_ops = {
