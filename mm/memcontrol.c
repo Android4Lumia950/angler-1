@@ -6538,9 +6538,7 @@ static void mem_cgroup_invalidate_reclaim_iterators(struct mem_cgroup *memcg)
 
 static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-
-	kmem_cgroup_css_offline(memcg);
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
 
 	mem_cgroup_invalidate_reclaim_iterators(memcg);
 	mem_cgroup_reparent_charges(memcg);
