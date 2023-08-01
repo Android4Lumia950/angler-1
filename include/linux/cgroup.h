@@ -949,17 +949,6 @@ static inline void pr_cont_cgroup_name(struct cgroup *cgrp)
 unsigned short css_id(struct cgroup_subsys_state *css);
 struct cgroup_subsys_state *cgroup_css_from_dir(struct file *f, int id);
 
-/*
- * Default Android check for whether the current process is allowed to move a
- * task across cgroups, either because CAP_SYS_NICE is set or because the uid
- * of the calling process is the same as the moved task or because we are
- * running as root.
- * Returns 0 if this is allowed, or -EACCES otherwise.
- */
-int subsys_cgroup_allow_attach(struct cgroup_subsys_state *css,
-			       struct cgroup_taskset *tset);
-
-
 #else /* !CONFIG_CGROUPS */
 
 struct cgroup_subsys_state;
@@ -995,6 +984,7 @@ static inline int subsys_cgroup_allow_attach(struct cgroup_subsys_state *css,
 {
 	return 0;
 }
+
 #endif /* !CONFIG_CGROUPS */
 
 /*
