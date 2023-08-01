@@ -122,16 +122,10 @@ struct percpu_rw_semaphore cgroup_threadgroup_rwsem;
 			   "cgroup_mutex or RCU read lock required");
 
 /*
- * cgroup destruction makes heavy use of work items and there can be a lot
- * of concurrent destructions.  Use a separate workqueue so that cgroup
- * destruction work items don't end up filling up max_active of system_wq
- * which may lead to deadlock.
- */
-static struct workqueue_struct *cgroup_destroy_wq;
-
-/*
- * pidlist destructions need to be flushed on cgroup destruction.  Use a
- * separate workqueue as flush domain.
+ * Generate an array of cgroup subsystem pointers. At boot time, this is
+ * populated with the built in subsystems, and modular subsystems are
+ * registered after that. The mutable section of this array is protected by
+ * cgroup_mutex.
  */
 static struct workqueue_struct *cgroup_pidlist_destroy_wq;
 
@@ -1254,7 +1248,7 @@ static void cgroup_free_rcu(struct rcu_head *head)
 {
 	struct cgroup *cgrp = container_of(head, struct cgroup, rcu_head);
 
-	queue_work(cgroup_destroy_wq, &cgrp->free_work);
+	schedule_work(&cgrp->free_work);
 }
 
 static void cgroup_diput(struct dentry *dentry, struct inode *inode)
@@ -6433,31 +6427,6 @@ int __init cgroup_init(void)
 	return 0;
 }
 
-static int __init cgroup_wq_init(void)
-{
-	/*
-	 * There isn't much point in executing destruction path in
-	 * parallel.  Good chunk is serialized with cgroup_mutex anyway.
-	 * Use 1 for @max_active.
-	 *
-	 * We would prefer to do this in cgroup_init() above, but that
-	 * is called before init_workqueues(): so leave this until after.
-	 */
-	cgroup_destroy_wq = alloc_workqueue("cgroup_destroy", 0, 1);
-	BUG_ON(!cgroup_destroy_wq);
-
-	/*
-	 * Used to destroy pidlists and separate to serve as flush domain.
-	 * Cap @max_active to 1 too.
-	 */
-	cgroup_pidlist_destroy_wq = alloc_workqueue("cgroup_pidlist_destroy",
-						    0, 1);
-	BUG_ON(!cgroup_pidlist_destroy_wq);
-
-	return 0;
-}
-core_initcall(cgroup_wq_init);
-
 /*
  * proc_cgroup_show()
  *  - Print task's cgroup paths into seq_file, one line for each hierarchy
@@ -6790,6 +6759,34 @@ static void check_for_release(struct cgroup *cgrp)
 			schedule_work(&release_agent_work);
 	}
 }
+
+/* Caller must verify that the css is not for root cgroup */
+bool __css_tryget(struct cgroup_subsys_state *css)
+{
+	while (true) {
+		int t, v;
+
+		v = css_refcnt(css);
+		t = atomic_cmpxchg(&css->refcnt, v, v + 1);
+		if (likely(t == v))
+			return true;
+		else if (t < 0)
+			return false;
+		cpu_relax();
+	}
+}
+EXPORT_SYMBOL_GPL(__css_tryget);
+
+/* Caller must verify that the css is not for root cgroup */
+void __css_put(struct cgroup_subsys_state *css)
+{
+	int v;
+
+	v = css_unbias_refcnt(atomic_dec_return(&css->refcnt));
+	if (v == 0)
+		schedule_work(&css->dput_work);
+}
+EXPORT_SYMBOL_GPL(__css_put);
 
 /*
  * Notify userspace when a cgroup is released, by running the
