@@ -51,7 +51,83 @@ static inline __u32 f2fs_crc32(void *buff, size_t len)
 
 static inline bool f2fs_crc_valid(__u32 blk_crc, void *buff, size_t buff_size)
 {
-	return f2fs_crc32(buff, buff_size) == blk_crc;
+	if (wbc->sync_mode == WB_SYNC_ALL)
+		return REQ_SYNC | REQ_NOIDLE;
+	return 0;
+}
+
+static inline void inode_lock(struct inode *inode)
+{
+	mutex_lock(&inode->i_mutex);
+}
+
+static inline void inode_unlock(struct inode *inode)
+{
+	mutex_unlock(&inode->i_mutex);
+}
+
+#define rb_entry_safe(ptr, type, member) \
+	({ typeof(ptr) ____ptr = (ptr); \
+	   ____ptr ? rb_entry(____ptr, type, member) : NULL; \
+	})
+
+#define list_last_entry(ptr, type, member) \
+	list_entry((ptr)->prev, type, member)
+
+#define list_first_entry(ptr, type, member) \
+	list_entry((ptr)->next, type, member)
+
+/**
+ * wq_has_sleeper - check if there are any waiting processes
+ * @wq: wait queue head
+ *
+ * Returns true if wq has waiting processes
+ *
+ * Please refer to the comment for waitqueue_active.
+ */
+static inline bool wq_has_sleeper(wait_queue_head_t *wq) 
+{
+	/*   
+	 * We need to be sure we are in sync with the
+	 * add_wait_queue modifications to the wait queue.
+	 *
+	 * This memory barrier should be paired with one on the
+	 * waiting side.
+	 */
+	smp_mb();
+	return waitqueue_active(wq);
+}
+
+static inline struct dentry *file_dentry(const struct file *file)
+{
+	return file->f_path.dentry;
+}
+
+static inline void inode_nohighmem(struct inode *inode)
+{
+	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
+}
+
+/**
+ * current_time - Return FS time
+ * @inode: inode.
+ *
+ * Return the current time truncated to the time granularity supported by
+ * the fs.
+ *
+ * Note that inode and inode->sb cannot be NULL.
+ * Otherwise, the function warns and returns time without truncation.
+ */
+static inline struct timespec current_time(struct inode *inode)
+{
+	struct timespec now = current_kernel_time();
+
+	if (unlikely(!inode->i_sb)) {
+		WARN(1, "current_time() called with uninitialized super_block in the inode");
+		return now; 
+	}    
+
+	return timespec_trunc(now, inode->i_sb->s_time_gran);
 }
 
 /*
