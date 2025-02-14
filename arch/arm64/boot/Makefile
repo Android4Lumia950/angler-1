@@ -14,7 +14,7 @@
 # Based on the ia64 boot/Makefile.
 #
 
-include $(srctree)/arch/arm64/boot/dts/huawei/Makefile
+include $(srctree)/arch/arm64/boot/dts/lumia/Makefile
 
 targets := Image Image-dtb Image.gz Image.gz-dtb
 
