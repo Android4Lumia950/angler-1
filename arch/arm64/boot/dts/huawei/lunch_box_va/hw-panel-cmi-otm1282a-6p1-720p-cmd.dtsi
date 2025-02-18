@@ -18,7 +18,7 @@
 &mdss_mdp {
 	dsi_cmi_otm1282a_6p1_720p_cmd: qcom,mdss_dsi_cmi_otm1282a_6p1_720p_cmd {
 		qcom,mdss-dsi-panel-name = "CMI_OTM1282A_6P1_720P_CMD";
-		qcom,cont-splash-enabled;
+		//qcom,cont-splash-enabled;
 		qcom,mdss-dsi-panel-controller = <&mdss_dsi0>;
 		qcom,mdss-dsi-panel-type = "dsi_cmd_mode";
 		qcom,mdss-dsi-panel-destination = "display_1";

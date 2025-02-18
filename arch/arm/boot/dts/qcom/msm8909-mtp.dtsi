@@ -466,7 +466,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8909_mpps 2 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_hx8394d_qhd_vid {
@@ -474,7 +474,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8909_mpps 2 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &pmx_mdss {

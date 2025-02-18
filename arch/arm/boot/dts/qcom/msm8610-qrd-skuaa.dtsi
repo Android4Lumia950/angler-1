@@ -79,7 +79,7 @@
 };
 
 &dsi_hx8379a_wvga_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &pm8110_gpios {

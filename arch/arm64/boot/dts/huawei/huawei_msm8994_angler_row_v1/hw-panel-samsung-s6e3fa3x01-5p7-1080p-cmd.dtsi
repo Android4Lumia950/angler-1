@@ -18,7 +18,7 @@
 &mdss_mdp {
 	dsi_samsung_s6e3fa3x01_5p7_1080p_cmd: qcom,mdss_dsi_samsung_s6e3fa3x01_5p7_1080p_cmd {
 		qcom,mdss-dsi-panel-name = "SAMSUNG_S6E3FA3X01_5P7_1080P_CMD";
-		qcom,cont-splash-enabled;
+		//qcom,cont-splash-enabled;
 		qcom,mdss-dsi-panel-controller = <&mdss_dsi0>;
 		qcom,mdss-dsi-panel-type = "dsi_cmd_mode";
 		qcom,mdss-dsi-panel-destination = "display_1";

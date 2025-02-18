@@ -97,7 +97,7 @@
 };
 
 &dsi_ssd2080m_720_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &sdhc_2 {

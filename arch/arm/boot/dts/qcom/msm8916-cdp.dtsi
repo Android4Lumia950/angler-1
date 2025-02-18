@@ -475,7 +475,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8916_mpps 4 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_nt35590_720_vid {
@@ -483,7 +483,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8916_mpps 4 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,esd-check-enabled;
 };
 
@@ -492,7 +492,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8916_mpps 4 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,esd-check-enabled;
 };
 
@@ -501,7 +501,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <0>;
 	qcom,mdss-dsi-pwm-gpio = <&pm8916_mpps 4 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &pmx_mdss {

@@ -380,9 +380,9 @@
 };
 
 &dsi_truly_wvga_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_truly_wvga_cmd {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };

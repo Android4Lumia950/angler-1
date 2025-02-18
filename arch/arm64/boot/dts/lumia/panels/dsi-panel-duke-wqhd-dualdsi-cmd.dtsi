@@ -49,7 +49,7 @@
 		qcom,mdss-dsi-bllp-power-mode;
 		qcom,ulps-enabled;
 		qcom,cmd-sync-wait-broadcast;
-		// qcom,cont-splash-enabled;
+		// //qcom,cont-splash-enabled;
 		qcom,mdss-dsi-lane-0-state;
 		qcom,mdss-dsi-lane-1-state;
 		qcom,mdss-dsi-lane-2-state;
@@ -150,7 +150,7 @@
 		qcom,ulps-enabled;
 		qcom,cmd-sync-wait-broadcast;
 		qcom,cmd-sync-wait-trigger;
-		// qcom,cont-splash-enabled;
+		// //qcom,cont-splash-enabled;
 		qcom,mdss-dsi-lane-0-state;
 		qcom,mdss-dsi-lane-1-state;
 		qcom,mdss-dsi-lane-2-state;

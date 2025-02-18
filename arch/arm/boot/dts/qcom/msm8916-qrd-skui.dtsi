@@ -114,7 +114,7 @@
 };
 
 &dsi_otm8019a_fwvga_video {
-       qcom,cont-splash-enabled;
+       //qcom,cont-splash-enabled;
 };
 
 &tlmm_pinmux {

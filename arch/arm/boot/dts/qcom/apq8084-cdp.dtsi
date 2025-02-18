@@ -112,7 +112,7 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <100>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <2>;
 	qcom,mdss-dsi-pwm-gpio = <&pma8084_gpios 7 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_video_0 {
@@ -120,11 +120,11 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <50>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <2>;
 	qcom,mdss-dsi-pwm-gpio = <&pma8084_gpios 7 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_video_1 {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_cmd_0 {
@@ -132,15 +132,15 @@
 	qcom,mdss-dsi-bl-pmic-pwm-frequency = <50>;
 	qcom,mdss-dsi-bl-pmic-bank-select = <2>;
 	qcom,mdss-dsi-pwm-gpio = <&pma8084_gpios 7 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_cmd_1 {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &mdss_edp {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &mdss_mdp {

@@ -28,7 +28,7 @@
 };
 
 &dsi_hx8394a_720_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &pm8226_bms {

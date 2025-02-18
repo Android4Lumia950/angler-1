@@ -249,7 +249,7 @@
 };
 
 &dsi_hx8379a_fwvga_skua_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &pmx_mdss {

@@ -693,5 +693,5 @@
 };
 
 &dsi_tosh_720_vid {
-       qcom,cont-splash-enabled;
+       //qcom,cont-splash-enabled;
 };

@@ -329,14 +329,14 @@
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_jdi_1080_vid {
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &labibb {
@@ -349,14 +349,14 @@
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,mdss-dsi-pan-enable-dynamic-fps;
 	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 	qcom,mdss-dsi-min-refresh-rate = <30>;
 };
 
 &dsi_dual_sharp_video_1 {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,mdss-dsi-pan-enable-dynamic-fps;
 	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 	qcom,mdss-dsi-min-refresh-rate = <30>;
@@ -371,11 +371,11 @@
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
 	qcom,5v-boost-gpio = <&pm8994_gpios 14 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_video_1 {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &dsi_dual_jdi_cmd_0 {
@@ -387,13 +387,13 @@
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
 	qcom,5v-boost-gpio = <&pm8994_gpios 14 0>;
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,partial-update-enabled;
 	qcom,panel-roi-alignment = <4 4 2 2 20 20>;
 };
 
 &dsi_dual_jdi_cmd_1 {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 	qcom,partial-update-enabled;
 	qcom,panel-roi-alignment = <4 4 2 2 20 20>;
 };

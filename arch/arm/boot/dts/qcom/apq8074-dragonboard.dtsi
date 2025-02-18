@@ -663,5 +663,5 @@
 };
 
 &dsi_sharp_qhd_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };

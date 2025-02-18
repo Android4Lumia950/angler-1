@@ -35,7 +35,7 @@
 };
 
 &dsi_nt35590_qvga_cmd {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 
 &soc {

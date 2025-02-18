@@ -167,5 +167,5 @@
 };
 
 &dsi_otm8018b_fwvga_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };

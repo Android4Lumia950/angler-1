@@ -54,7 +54,7 @@
 };
 
 &dsi_hx8389b_qhd_vid {
-	qcom,cont-splash-enabled;
+	//qcom,cont-splash-enabled;
 };
 &soc {
 	i2c@f9925000 {
