@@ -100,18 +100,15 @@
 };
 
  &mdss_mdp {
-	 //qcom,mdss-pref-prim-intf = "dsi";
-	 status="disabled";
+	 qcom,mdss-pref-prim-intf = "dsi";
  };
  
  &mdss_dsi0 {
-	status="disabled";
-	 //qcom,dsi-pref-prim-pan = <&dsi_sergej_wqhd_dsi0_cmd>;
+	 qcom,dsi-pref-prim-pan = <&dsi_sergej_wqhd_dsi0_cmd>;
  };
  
  &mdss_dsi1 {
-	status="disabled";
-	 //qcom,dsi-pref-prim-pan = <&dsi_sergej_wqhd_dsi1_cmd>;
+	 qcom,dsi-pref-prim-pan = <&dsi_sergej_wqhd_dsi1_cmd>;
  };
  
  &pm8994_gpios {
