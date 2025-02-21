@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015,2017 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -359,7 +359,7 @@ static struct kgsl_cmdbatch *_get_cmdbatch(struct adreno_context *drawctxt)
 		 * it hasn't already been started
 		 */
 		if (!cmdbatch->timeout_jiffies) {
-			cmdbatch->timeout_jiffies = jiffies + msecs_to_jiffies(5000);
+			cmdbatch->timeout_jiffies = jiffies + 5 * HZ;
 			mod_timer(&cmdbatch->timer, cmdbatch->timeout_jiffies);
 		}
 
@@ -1024,13 +1024,6 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 
 	if (drawctxt->base.flags & KGSL_CONTEXT_NO_FAULT_TOLERANCE)
 		set_bit(KGSL_FT_DISABLE, &cmdbatch->fault_policy);
-	/*
-	 *  Set the fault tolerance policy to FT_REPLAY - As context wants
-	 *  to invalidate it after a replay attempt fails. This doesn't
-	 *  require to execute the default FT policy.
-	 */
-	else if (drawctxt->base.flags & KGSL_CONTEXT_INVALIDATE_ON_FAULT)
-		set_bit(KGSL_FT_REPLAY, &cmdbatch->fault_policy);
 	else
 		cmdbatch->fault_policy = adreno_dev->ft_policy;
 
@@ -1911,7 +1904,7 @@ static int adreno_dispatch_process_cmdqueue(struct adreno_device *adreno_dev,
  *
  * Process expired commands and send new ones.
  */
-static void adreno_dispatcher_work(struct kthread_work *work)
+static void adreno_dispatcher_work(struct work_struct *work)
 {
 	struct adreno_dispatcher *dispatcher =
 		container_of(work, struct adreno_dispatcher, work);
@@ -1988,7 +1981,7 @@ void adreno_dispatcher_schedule(struct kgsl_device *device)
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
 
-	queue_kthread_work(&kgsl_driver.worker, &dispatcher->work);
+	queue_work(device->work_queue, &dispatcher->work);
 }
 
 /**
@@ -2279,7 +2272,7 @@ int adreno_dispatcher_init(struct adreno_device *adreno_dev)
 	setup_timer(&dispatcher->fault_timer, adreno_dispatcher_fault_timer,
 		(unsigned long) adreno_dev);
 
-	init_kthread_work(&dispatcher->work, adreno_dispatcher_work);
+	INIT_WORK(&dispatcher->work, adreno_dispatcher_work);
 
 	init_completion(&dispatcher->idle_gate);
 	complete_all(&dispatcher->idle_gate);
