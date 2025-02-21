@@ -62,6 +62,7 @@
 #include <linux/kthread.h>
 
 #include <linux/atomic.h>
+#include <net/sock.h>
 
 /* css deactivation bias, makes css->refcnt negative to deny new trygets */
 #define CSS_DEACT_BIAS		INT_MIN
@@ -90,6 +91,8 @@ static DEFINE_MUTEX(cgroup_mutex);
 #endif
 
 static DEFINE_MUTEX(cgroup_root_mutex);
+
+static struct file_system_type compat_cgroup2_fs_type;
 
 /*
  * cgroup destruction makes heavy use of work items and there can be a lot
@@ -840,6 +843,7 @@ static void cgroup_free_fn(struct work_struct *work)
 	struct cgroup_subsys *ss;
 
 	mutex_lock(&cgroup_mutex);
+	cgroup_bpf_put(cgrp);
 	/*
 	 * Release the subsystem state objects.
 	 */
@@ -1582,11 +1586,19 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 	struct super_block *sb;
 	struct cgroupfs_root *new_root;
 	struct inode *inode;
+	bool is_v2 = fs_type == &compat_cgroup2_fs_type;
 
 	/* First find the desired set of subsystems */
-	mutex_lock(&cgroup_mutex);
-	ret = parse_cgroupfs_options(data, &opts);
-	mutex_unlock(&cgroup_mutex);
+	if(is_v2){
+	       memset(&opts, 0, sizeof(opts));
+	       opts.none = true;
+	}
+
+	else{
+	       mutex_lock(&cgroup_mutex);
+	       ret = parse_cgroupfs_options(data, &opts);
+	       mutex_unlock(&cgroup_mutex);
+	}
 	if (ret)
 		goto out_err;
 
@@ -1684,6 +1696,7 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		cred = override_creds(&init_cred);
 		cgroup_populate_dir(root_cgrp, true, root->subsys_mask);
 		revert_creds(cred);
+		cgroup_bpf_inherit(root_cgrp);
 		mutex_unlock(&cgroup_root_mutex);
 		mutex_unlock(&cgroup_mutex);
 		mutex_unlock(&inode->i_mutex);
@@ -1776,6 +1789,12 @@ static void cgroup_kill_sb(struct super_block *sb) {
 
 static struct file_system_type cgroup_fs_type = {
 	.name = "cgroup",
+	.mount = cgroup_mount,
+	.kill_sb = cgroup_kill_sb,
+};
+
+static struct file_system_type compat_cgroup2_fs_type = {
+	.name = "cgroup2",
 	.mount = cgroup_mount,
 	.kill_sb = cgroup_kill_sb,
 };
@@ -2119,6 +2138,25 @@ static int cgroup_allow_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
 		} else {
 			return -EACCES;
 		}
+	}
+
+	return 0;
+}
+
+int subsys_cgroup_allow_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
+{
+	const struct cred *cred = current_cred(), *tcred;
+	struct task_struct *task;
+
+	if (capable(CAP_SYS_NICE))
+		return 0;
+
+	cgroup_taskset_for_each(task, cgrp, tset) {
+		tcred = __task_cred(task);
+
+		if (current != task && cred->euid != tcred->uid &&
+		    cred->euid != tcred->suid)
+			return -EACCES;
 	}
 
 	return 0;
@@ -4228,6 +4266,10 @@ static long cgroup_create(struct cgroup *parent, struct dentry *dentry,
 		}
 	}
 
+	err = cgroup_bpf_inherit(cgrp);
+	if (err)
+		goto err_free_all;
+
 	/*
 	 * Create directory.  cgroup_create_file() returns with the new
 	 * directory locked on success so that it can be populated without
@@ -4707,6 +4749,12 @@ int __init cgroup_init(void)
 	}
 
 	err = register_filesystem(&cgroup_fs_type);
+	if (err < 0) {
+		kobject_put(cgroup_kobj);
+		goto out;
+	}
+
+	err = register_filesystem(&compat_cgroup2_fs_type);
 	if (err < 0) {
 		kobject_put(cgroup_kobj);
 		goto out;
@@ -5368,6 +5416,102 @@ struct cgroup_subsys_state *cgroup_css_from_dir(struct file *f, int id)
 	css = cgrp->subsys[id];
 	return css ? css : ERR_PTR(-ENOENT);
 }
+
+struct cgroup *cgroup_get_from_fd(int fd)
+{
+	struct file *f;
+	struct inode *inode;
+	struct cgroup *cgrp;
+
+	f = fget_raw(fd);
+	if (!f)
+		return ERR_PTR(-EBADF);
+
+	inode = file_inode(f);
+	/* check in cgroup filesystem dir */
+	if (inode->i_op != &cgroup_dir_inode_operations){
+		fput(f);
+		return ERR_PTR(-EBADF);
+	}
+
+	cgrp = __d_cgrp(f->f_dentry);
+	atomic_inc(&cgrp->count);
+	fput(f);
+	return cgrp;
+
+}
+EXPORT_SYMBOL_GPL(cgroup_get_from_fd);
+
+static struct cgroupfs_root *findBpfCg(void){
+
+	struct cgroupfs_root *root;
+
+	for_each_active_root(root)
+		if(root->subsys_mask == 0)
+			return root;
+
+	return NULL;
+
+}
+
+void cgroup_sk_alloc(struct cgroup **skcg)
+{
+	struct cgroup *cgrp;
+	static struct cgroupfs_root *bpfRoot = NULL;
+
+	/* Don't associate the sock with unrelated interrupted task's cgroup. */
+	if (in_interrupt())
+		return;
+
+	if(bpfRoot == NULL)
+		bpfRoot = findBpfCg();
+
+	if(bpfRoot){
+		mutex_lock(&cgroup_mutex);
+		cgrp = task_cgroup_from_root(current, bpfRoot);
+	        atomic_inc(&cgrp->count);
+		mutex_unlock(&cgroup_mutex);
+		*skcg = cgrp;
+	}
+	else
+		*skcg = NULL;
+}
+
+void cgroup_sk_clone(struct cgroup *skcg)
+{
+	/* Socket clone path */
+	if (skcg)
+		atomic_inc(&skcg->count);
+}
+
+void cgroup_sk_free(struct cgroup *skcg)
+{
+	if (skcg)
+		atomic_dec(&skcg->count);
+}
+
+#ifdef CONFIG_CGROUP_BPF
+int cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
+		      enum bpf_attach_type type, u32 flags)
+{
+	int ret;
+
+	mutex_lock(&cgroup_mutex);
+	ret = __cgroup_bpf_attach(cgrp, prog, type, flags);
+	mutex_unlock(&cgroup_mutex);
+	return ret;
+}
+int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
+		      enum bpf_attach_type type, u32 flags)
+{
+	int ret;
+
+	mutex_lock(&cgroup_mutex);
+	ret = __cgroup_bpf_detach(cgrp, prog, type, flags);
+	mutex_unlock(&cgroup_mutex);
+	return ret;
+}
+#endif /* CONFIG_CGROUP_BPF */
 
 #ifdef CONFIG_CGROUP_DEBUG
 static struct cgroup_subsys_state *debug_css_alloc(struct cgroup *cont)

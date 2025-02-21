@@ -836,6 +836,10 @@ static void uprobe_perf_print(struct trace_uprobe *tu,
 	void *data;
 	int size, rctx, i;
 
+
+	if (bpf_prog_array_valid(call) && !trace_call_bpf(call, regs))
+                return;
+
 	size = SIZEOF_TRACE_ENTRY(is_ret_probe(tu));
 	size = ALIGN(size + tu->size + sizeof(u32), sizeof(u64)) - sizeof(u32);
 	if (WARN_ONCE(size > PERF_MAX_TRACE_SIZE, "profile buffer not large enough"))
@@ -846,7 +850,7 @@ static void uprobe_perf_print(struct trace_uprobe *tu,
 	if (hlist_empty(head))
 		goto out;
 
-	entry = perf_trace_buf_prepare(size, call->event.type, regs, &rctx);
+	entry = perf_trace_buf_alloc(size, regs, &rctx);
 	if (!entry)
 		goto out;
 
@@ -862,7 +866,8 @@ static void uprobe_perf_print(struct trace_uprobe *tu,
 	for (i = 0; i < tu->nr_args; i++)
 		call_fetch(&tu->args[i].fetch, regs, data + tu->args[i].offset);
 
-	perf_trace_buf_submit(entry, size, rctx, 0, 1, regs, head, NULL);
+	perf_trace_buf_submit(entry, size, rctx, call->event.type, 1, regs,
+			      head, NULL);
  out:
 	preempt_enable();
 }
@@ -976,7 +981,7 @@ static int register_uprobe_event(struct trace_uprobe *tu)
 		kfree(call->print_fmt);
 		return -ENODEV;
 	}
-	call->flags = 0;
+	call->flags = TRACE_EVENT_FL_UPROBE;
 	call->class->reg = trace_uprobe_register;
 	call->data = tu;
 	ret = trace_add_event_call(call);

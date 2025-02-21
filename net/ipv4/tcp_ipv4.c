@@ -1468,7 +1468,7 @@ static int tcp_v4_conn_req_fastopen(struct sock *sk,
 		tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 		tp->syn_data_acked = 1;
 	}
-	sk->sk_data_ready(sk, 0);
+	sk->sk_data_ready(sk);
 	bh_unlock_sock(child);
 	sock_put(child);
 	WARN_ON(req->sk == NULL);
@@ -1534,6 +1534,8 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 
 	tmp_opt.tstamp_ok = tmp_opt.saw_tstamp;
 	tcp_openreq_init(req, &tmp_opt, skb);
+	inet_rsk(req)->ireq_net = sock_net(sk);
+	atomic64_set(&inet_rsk(req)->ir_cookie, 0);
 
 	ireq = inet_rsk(req);
 	ireq->loc_addr = daddr;

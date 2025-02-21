@@ -727,7 +727,7 @@ static void tcp_update_pacing_rate(struct sock *sk)
 	if (tp->srtt > 8 + 2)
 		do_div(rate, tp->srtt);
 
-	sk->sk_pacing_rate = min_t(u64, rate, ~0U);
+	sk->sk_pacing_rate = min_t(u64, rate, sk->sk_max_pacing_rate);
 }
 
 /* Calculate rto without backoff.  This is the second half of Van Jacobson's
@@ -4418,7 +4418,7 @@ queue_and_out:
 		if (eaten > 0)
 			kfree_skb_partial(skb, fragstolen);
 		if (!sock_flag(sk, SOCK_DEAD))
-			sk->sk_data_ready(sk, 0);
+			sk->sk_data_ready(sk);
 		return;
 	}
 
@@ -4928,7 +4928,7 @@ static void tcp_urg(struct sock *sk, struct sk_buff *skb, const struct tcphdr *t
 				BUG();
 			tp->urg_data = TCP_URG_VALID | tmp;
 			if (!sock_flag(sk, SOCK_DEAD))
-				sk->sk_data_ready(sk, 0);
+				sk->sk_data_ready(sk);
 		}
 	}
 }
@@ -4944,7 +4944,7 @@ static int tcp_copy_to_iovec(struct sock *sk, struct sk_buff *skb, int hlen)
 		err = skb_copy_datagram_iovec(skb, hlen, tp->ucopy.iov, chunk);
 	else
 		err = skb_copy_and_csum_datagram_iovec(skb, hlen,
-						       tp->ucopy.iov);
+						       tp->ucopy.iov, chunk);
 
 	if (!err) {
 		tp->ucopy.len -= chunk;
@@ -5014,11 +5014,11 @@ static bool tcp_dma_try_early_copy(struct sock *sk, struct sk_buff *skb,
 		    (tcp_flag_word(tcp_hdr(skb)) & TCP_FLAG_PSH) ||
 		    (atomic_read(&sk->sk_rmem_alloc) > (sk->sk_rcvbuf >> 1))) {
 			tp->ucopy.wakeup = 1;
-			sk->sk_data_ready(sk, 0);
+			sk->sk_data_ready(sk);
 		}
 	} else if (chunk > 0) {
 		tp->ucopy.wakeup = 1;
-		sk->sk_data_ready(sk, 0);
+		sk->sk_data_ready(sk);
 	}
 out:
 	return copied_early;
@@ -5289,7 +5289,7 @@ no_ack:
 #endif
 			if (eaten)
 				kfree_skb_partial(skb, fragstolen);
-			sk->sk_data_ready(sk, 0);
+			sk->sk_data_ready(sk);
 			return 0;
 		}
 	}

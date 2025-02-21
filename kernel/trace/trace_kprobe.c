@@ -1175,6 +1175,9 @@ kprobe_perf_func(struct trace_probe *tp, struct pt_regs *regs)
 	int size, __size, dsize;
 	int rctx;
 
+	if (bpf_prog_array_valid(call) && !trace_call_bpf(call, regs))
+		return;
+
 	dsize = __get_data_size(tp, regs);
 	__size = sizeof(*entry) + tp->size + dsize;
 	size = ALIGN(__size + sizeof(u32), sizeof(u64));
@@ -1183,7 +1186,7 @@ kprobe_perf_func(struct trace_probe *tp, struct pt_regs *regs)
 		     "profile buffer not large enough"))
 		return;
 
-	entry = perf_trace_buf_prepare(size, call->event.type, regs, &rctx);
+	entry = perf_trace_buf_alloc(size, regs, &rctx);
 	if (!entry)
 		return;
 
@@ -1192,8 +1195,8 @@ kprobe_perf_func(struct trace_probe *tp, struct pt_regs *regs)
 	store_trace_args(sizeof(*entry), tp, regs, (u8 *)&entry[1], dsize);
 
 	head = this_cpu_ptr(call->perf_events);
-	perf_trace_buf_submit(entry, size, rctx,
-					entry->ip, 1, regs, head, NULL);
+	perf_trace_buf_submit(entry, size, rctx, call->event.type, 1, regs,
+			      head, NULL);
 }
 
 /* Kretprobe profile handler */
@@ -1207,6 +1210,9 @@ kretprobe_perf_func(struct trace_probe *tp, struct kretprobe_instance *ri,
 	int size, __size, dsize;
 	int rctx;
 
+	if (bpf_prog_array_valid(call) && !trace_call_bpf(call, regs))
+		return;
+
 	dsize = __get_data_size(tp, regs);
 	__size = sizeof(*entry) + tp->size + dsize;
 	size = ALIGN(__size + sizeof(u32), sizeof(u64));
@@ -1215,7 +1221,7 @@ kretprobe_perf_func(struct trace_probe *tp, struct kretprobe_instance *ri,
 		     "profile buffer not large enough"))
 		return;
 
-	entry = perf_trace_buf_prepare(size, call->event.type, regs, &rctx);
+	entry = perf_trace_buf_alloc(size, regs, &rctx);
 	if (!entry)
 		return;
 
@@ -1224,8 +1230,8 @@ kretprobe_perf_func(struct trace_probe *tp, struct kretprobe_instance *ri,
 	store_trace_args(sizeof(*entry), tp, regs, (u8 *)&entry[1], dsize);
 
 	head = this_cpu_ptr(call->perf_events);
-	perf_trace_buf_submit(entry, size, rctx,
-					entry->ret_ip, 1, regs, head, NULL);
+	perf_trace_buf_submit(entry, size, rctx, call->event.type, 1, regs,
+			      head, NULL);
 }
 #endif	/* CONFIG_PERF_EVENTS */
 
@@ -1318,7 +1324,7 @@ static int register_probe_event(struct trace_probe *tp)
 		kfree(call->print_fmt);
 		return -ENODEV;
 	}
-	call->flags = 0;
+	call->flags = TRACE_EVENT_FL_KPROBE;
 	call->class->reg = kprobe_register;
 	call->data = tp;
 	ret = trace_add_event_call(call);

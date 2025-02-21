@@ -1596,16 +1596,16 @@ out_free:
 	return err;
 }
 
-static unsigned int run_filter(const struct sk_buff *skb,
-				      const struct sock *sk,
-				      unsigned int res)
+static unsigned int run_filter(struct sk_buff *skb,
+			       const struct sock *sk,
+			       unsigned int res)
 {
 	struct sk_filter *filter;
 
 	rcu_read_lock();
 	filter = rcu_dereference(sk->sk_filter);
 	if (filter != NULL)
-		res = SK_RUN_FILTER(filter, skb);
+		res = bpf_prog_run_clear_cb(filter->prog, skb);
 	rcu_read_unlock();
 
 	return res;
@@ -1716,7 +1716,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	skb->dropcount = atomic_read(&sk->sk_drops);
 	__skb_queue_tail(&sk->sk_receive_queue, skb);
 	spin_unlock(&sk->sk_receive_queue.lock);
-	sk->sk_data_ready(sk, skb->len);
+	sk->sk_data_ready(sk);
 	return 0;
 
 drop_n_acct:
@@ -1923,7 +1923,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	else
 		prb_clear_blk_fill_status(&po->rx_ring);
 
-	sk->sk_data_ready(sk, 0);
+	sk->sk_data_ready(sk);
 
 drop_n_restore:
 	if (skb_head != skb->data && skb_shared(skb)) {
@@ -1938,7 +1938,7 @@ ring_is_full:
 	po->stats.stats1.tp_drops++;
 	spin_unlock(&sk->sk_receive_queue.lock);
 
-	sk->sk_data_ready(sk, 0);
+	sk->sk_data_ready(sk);
 	kfree_skb(copy_skb);
 	goto drop_n_restore;
 }
