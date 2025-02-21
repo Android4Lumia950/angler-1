@@ -1054,52 +1054,51 @@ static int l2tp_build_l2tpv3_header(struct l2tp_session *session, void *buf)
 }
 
 static int l2tp_xmit_core(struct l2tp_session *session, struct sk_buff *skb,
-			  struct flowi *fl, size_t data_len)
+	struct flowi *fl, size_t data_len)
 {
-	struct l2tp_tunnel *tunnel = session->tunnel;
-	unsigned int len = skb->len;
-	int error;
+struct l2tp_tunnel *tunnel = session->tunnel;
+unsigned int len = skb->len;
+int error;
 
-	/* Debug */
-	if (session->send_seq)
-		l2tp_dbg(session, L2TP_MSG_DATA, "%s: send %Zd bytes, ns=%u\n",
-			 session->name, data_len, session->ns - 1);
-	else
-		l2tp_dbg(session, L2TP_MSG_DATA, "%s: send %Zd bytes\n",
-			 session->name, data_len);
+/* Debug */
+if (session->send_seq)
+l2tp_dbg(session, L2TP_MSG_DATA, "%s: send %Zd bytes, ns=%u\n",
+   session->name, data_len, session->ns - 1);
+else
+l2tp_dbg(session, L2TP_MSG_DATA, "%s: send %Zd bytes\n",
+   session->name, data_len);
 
-	if (session->debug & L2TP_MSG_DATA) {
-		int uhlen = (tunnel->encap == L2TP_ENCAPTYPE_UDP) ? sizeof(struct udphdr) : 0;
-		unsigned char *datap = skb->data + uhlen;
+if (session->debug & L2TP_MSG_DATA) {
+int uhlen = (tunnel->encap == L2TP_ENCAPTYPE_UDP) ? sizeof(struct udphdr) : 0;
+unsigned char *datap = skb->data + uhlen;
 
-		pr_debug("%s: xmit\n", session->name);
-		print_hex_dump_bytes("", DUMP_PREFIX_OFFSET,
-				     datap, min_t(size_t, 32, len - uhlen));
-	}
-
-	/* Queue the packet to IP for output */
-	skb->local_df = 1;
-#if IS_ENABLED(CONFIG_IPV6)
-	if (skb->sk->sk_family == PF_INET6 && !tunnel->v4mapped)
-		error = inet6_csk_xmit(skb, NULL);
-	else
-#endif
-		error = ip_queue_xmit(skb, fl);
-
-	/* Update stats */
-	if (error >= 0) {
-		atomic_long_inc(&tunnel->stats.tx_packets);
-		atomic_long_add(len, &tunnel->stats.tx_bytes);
-		atomic_long_inc(&session->stats.tx_packets);
-		atomic_long_add(len, &session->stats.tx_bytes);
-	} else {
-		atomic_long_inc(&tunnel->stats.tx_errors);
-		atomic_long_inc(&session->stats.tx_errors);
-	}
-
-	return 0;
+pr_debug("%s: xmit\n", session->name);
+print_hex_dump_bytes("", DUMP_PREFIX_OFFSET,
+		   datap, min_t(size_t, 32, len - uhlen));
 }
 
+/* Queue the packet to IP for output */
+skb->ignore_df = 1;
+#if IS_ENABLED(CONFIG_IPV6)
+if (skb->sk->sk_family == PF_INET6 && !tunnel->v4mapped)
+error = inet6_csk_xmit(skb, NULL);
+else
+#endif
+error = ip_queue_xmit(skb, fl);
+
+/* Update stats */
+if (error >= 0) {
+atomic_long_inc(&tunnel->stats.tx_packets);
+atomic_long_add(len, &tunnel->stats.tx_bytes);
+atomic_long_inc(&session->stats.tx_packets);
+atomic_long_add(len, &session->stats.tx_bytes);
+} else {
+atomic_long_inc(&tunnel->stats.tx_errors);
+atomic_long_inc(&session->stats.tx_errors);
+}
+
+return 0;
+}
 /* Automatically called when the skb is freed.
  */
 static void l2tp_sock_wfree(struct sk_buff *skb)

@@ -684,13 +684,13 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 #ifdef CONFIG_XFRM
 	new->sp			= secpath_get(old->sp);
 #endif
-	memcpy(new->cb, old->cb, sizeof(old->cb));
-	new->csum		= old->csum;
-	new->local_df		= old->local_df;
-	new->pkt_type		= old->pkt_type;
-	new->ip_summed		= old->ip_summed;
-	skb_copy_queue_mapping(new, old);
-	new->priority		= old->priority;
+memcpy(new->cb, old->cb, sizeof(old->cb));
+new->csum		= old->csum;
+new->ignore_df		= old->ignore_df;
+new->pkt_type		= old->pkt_type;
+new->ip_summed		= old->ip_summed;
+skb_copy_queue_mapping(new, old);
+new->priority		= old->priority;
 #if IS_ENABLED(CONFIG_IP_VS)
 	new->ipvs_property	= old->ipvs_property;
 #endif
