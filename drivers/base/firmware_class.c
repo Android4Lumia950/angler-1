@@ -1062,10 +1062,8 @@ static int fw_load_from_user_helper(struct firmware *firmware,
 	return _request_firmware_load(fw_priv, desc->uevent, timeout);
 }
 #else /* CONFIG_FW_LOADER_USER_HELPER */
-static inline int
-fw_load_from_user_helper(struct firmware *firmware, const char *name,
-			 struct device *device, bool uevent, bool nowait,
-			 long timeout)
+static int fw_load_from_user_helper(struct firmware *firmware,
+	struct fw_desc *desc, long timeout)
 {
 	return -ENOENT;
 }
