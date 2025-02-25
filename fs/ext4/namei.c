@@ -3791,12 +3791,8 @@ end_rename:
 #endif
 
 static int ext4_rename2(struct inode *old_dir, struct dentry *old_dentry,
-			struct inode *new_dir, struct dentry *new_dentry,
-			unsigned int flags)
+			struct inode *new_dir, struct dentry *new_dentry)
 {
-	if (flags & ~RENAME_NOREPLACE)
-		return -EINVAL;
-
 	return ext4_rename(old_dir, old_dentry, new_dir, new_dentry, 0);
 }
 
@@ -3813,7 +3809,7 @@ const struct inode_operations ext4_dir_inode_operations = {
 	.rmdir		= ext4_rmdir,
 	.mknod		= ext4_mknod,
 	.tmpfile	= ext4_tmpfile,
-	.rename		= ext4_rename,
+	.rename		= ext4_rename2,
 	.setattr	= ext4_setattr,
 	.setxattr	= generic_setxattr,
 	.getxattr	= generic_getxattr,
