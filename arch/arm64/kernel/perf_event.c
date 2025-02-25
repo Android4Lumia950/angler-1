@@ -1738,21 +1738,21 @@ static int callchain_trace(struct stackframe *frame, void *data)
 	return 0;
 }
 
-void perf_callchain_kernel(struct perf_callchain_entry *entry,
-			   struct pt_regs *regs)
+void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
+	struct pt_regs *regs)
 {
-	struct stackframe frame;
+struct stackframe frame;
 
-	if (perf_guest_cbs && perf_guest_cbs->is_in_guest()) {
-		/* We don't support guest os callchain now */
-		return;
-	}
+if (perf_guest_cbs && perf_guest_cbs->is_in_guest()) {
+/* We don't support guest os callchain now */
+return;
+}
 
-	frame.fp = regs->regs[29];
-	frame.sp = regs->sp;
-	frame.pc = regs->pc;
+frame.fp = regs->regs[29];
+frame.sp = regs->sp;
+frame.pc = regs->pc;
 
-	walk_stackframe(&frame, callchain_trace, entry);
+walk_stackframe(&frame, callchain_trace, entry);
 }
 
 unsigned long perf_instruction_pointer(struct pt_regs *regs)

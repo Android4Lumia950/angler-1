@@ -28,6 +28,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <trace/events/power.h>
+#include <linux/slab.h>
 
 static DEFINE_MUTEX(l2bw_lock);
 

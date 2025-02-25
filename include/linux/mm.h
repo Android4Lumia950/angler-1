@@ -1601,8 +1601,6 @@ vm_unmapped_area(struct vm_unmapped_area_info *info)
 extern void truncate_inode_pages(struct address_space *, loff_t);
 extern void truncate_inode_pages_range(struct address_space *,
 				       loff_t lstart, loff_t lend);
-extern void truncate_inode_pages_final(struct address_space *);
-
 /* generic vm_area_ops exported for stackable file systems */
 extern int filemap_fault(struct vm_area_struct *, struct vm_fault *);
 extern int filemap_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf);
@@ -1904,11 +1902,7 @@ static inline unsigned int debug_guardpage_minorder(void) { return 0; }
 static inline bool page_is_guard(struct page *page) { return false; }
 #endif /* CONFIG_DEBUG_PAGEALLOC */
 
-/* 3.18 backport */
-static inline void truncate_inode_pages_final(struct address_space *mapping)
-{
-	truncate_inode_pages(mapping, 0);
-}
+extern void truncate_inode_pages_final(struct address_space *);
 
 #if MAX_NUMNODES > 1
 void __init setup_nr_node_ids(void);

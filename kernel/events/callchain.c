@@ -4,7 +4,7 @@
  *  Copyright (C) 2008 Thomas Gleixner <tglx@linutronix.de>
  *  Copyright (C) 2008-2011 Red Hat, Inc., Ingo Molnar
  *  Copyright (C) 2008-2011 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
- *  Copyright  ©  2009 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
+ *  Copyright  ï¿½  2009 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  *
  * For licensing details see kernel-base/COPYING
  */
@@ -37,8 +37,7 @@ __weak void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
 {
 }
 
-__weak void perf_callchain_user(struct perf_callchain_entry_ctx *entry,
-				struct pt_regs *regs)
+__weak void perf_callchain_user(struct perf_callchain_entry *entry,struct pt_regs *regs)
 {
 }
 
