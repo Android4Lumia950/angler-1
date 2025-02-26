@@ -1020,6 +1020,12 @@ out_err:
 	return ERR_PTR(err);
 }
 
+
+void bpf_jit_compile(struct bpf_prog *prog)
+{
+	/* Nothing to do here. We support Internal BPF. */
+}
+
 static struct bpf_prog *bpf_prepare_filter(struct bpf_prog *fp,
 					   bpf_aux_classic_check_t trans)
 {
