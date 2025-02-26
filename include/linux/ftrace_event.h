@@ -354,23 +354,11 @@ extern int filter_current_check_discard(struct ring_buffer *buffer,
 					void *rec,
 					struct ring_buffer_event *event);
 
-#ifdef CONFIG_BPF_EVENTS
+
 unsigned int trace_call_bpf(struct ftrace_event_call *call, void *ctx);
 int perf_event_attach_bpf_prog(struct perf_event *event, struct bpf_prog *prog);
 void perf_event_detach_bpf_prog(struct perf_event *event);
-#else
-static inline unsigned int trace_call_bpf(struct ftrace_event_call *call, void *ctx)
-{
-	return 1;
-}
-static inline int
-perf_event_attach_bpf_prog(struct perf_event *event, struct bpf_prog *prog)
-{
-	return -EOPNOTSUPP;
-}
 
-static inline void perf_event_detach_bpf_prog(struct perf_event *event) { }
-#endif
 
 enum {
 	FILTER_OTHER = 0,
