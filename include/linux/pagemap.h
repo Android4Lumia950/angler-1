@@ -230,6 +230,7 @@ static inline void page_unfreeze_refs(struct page *page, int count)
 #ifdef CONFIG_NUMA
 extern struct page *__page_cache_alloc(gfp_t gfp);
 #else
+
 static inline struct page *__page_cache_alloc(gfp_t gfp)
 {
 	struct page *page;
@@ -243,12 +244,6 @@ static inline struct page *__page_cache_alloc(gfp_t gfp)
 
 	return page;
 }
-#endif
-
-static inline struct page *page_cache_alloc(struct address_space *x)
-{
-	return __page_cache_alloc(mapping_gfp_mask(x));
-}
 
 static inline struct page *page_cache_alloc_cold(struct address_space *x)
 {
@@ -261,23 +256,12 @@ static inline struct page *page_cache_alloc_readahead(struct address_space *x)
 				  __GFP_COLD | __GFP_NORETRY | __GFP_NOWARN);
 }
 
-typedef int filler_t(void *, struct page *);
-
-extern struct page * find_get_page_flags(struct address_space *mapping,
-					 pgoff_t index, int fgp_flags);
-
-#define FGP_ACCESSED		0x00000001
-
-static inline struct page* find_get_page(struct address_space *mapping,
-					 pgoff_t index)
-{
-	return find_get_page_flags(mapping, index, 0);
-}
-
 pgoff_t page_cache_next_hole(struct address_space *mapping,
 			     pgoff_t index, unsigned long max_scan);
 pgoff_t page_cache_prev_hole(struct address_space *mapping,
 			     pgoff_t index, unsigned long max_scan);
+
+typedef int filler_t(void *, struct page *);
 
 struct page *__find_get_page(struct address_space *mapping, pgoff_t offset);
 struct page *find_get_page(struct address_space *mapping, pgoff_t offset);
@@ -596,5 +580,5 @@ static inline int add_to_page_cache(struct page *page,
 		__clear_page_locked(page);
 	return error;
 }
-
+#endif
 #endif /* _LINUX_PAGEMAP_H */
